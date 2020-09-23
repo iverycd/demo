@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="DataSourceManagerImpl" format="xml" multifile-model="true">
+    <data-source source="LOCAL" name="192.168.149.33_ora12c" group="ora" uuid="fb1d9618-cd87-4bab-802a-eaf5206ac9d0">
+      <driver-ref>oracle</driver-ref>
+      <synchronize>true</synchronize>
+      <remarks>172.16.4.82_oracle12c</remarks>
+      <auto-commit>false</auto-commit>
+      <jdbc-driver>oracle.jdbc.OracleDriver</jdbc-driver>
+      <jdbc-url>jdbc:oracle:thin:@//192.168.149.33:1527/ora12c</jdbc-url>
+    </data-source>
+    <data-source source="LOCAL" name="192.168.188.155" group="mysql" uuid="9d22aaff-b2b8-4e8b-8d93-582fd637d9c5">
+      <driver-ref>mysql.8</driver-ref>
+      <synchronize>true</synchronize>
+      <jdbc-driver>com.mysql.cj.jdbc.Driver</jdbc-driver>
+      <jdbc-url>jdbc:mysql://192.168.188.155:3306/test</jdbc-url>
+    </data-source>
+    <data-source source="LOCAL" name="192.168.189.208_njjbxq_djgbz" group="ora" uuid="c24bd485-6c71-4586-a950-514ab60562ea">
+      <driver-ref>oracle</driver-ref>
+      <synchronize>true</synchronize>
+      <auto-commit>false</auto-commit>
+      <jdbc-driver>oracle.jdbc.OracleDriver</jdbc-driver>
+      <jdbc-url>jdbc:oracle:thin:@//192.168.189.208:1522/orcl11g</jdbc-url>
+    </data-source>
+    <data-source source="LOCAL" name="mysqL_192.168.189.208_NJJBXQ_DJGBZ" group="mysql" uuid="afaf3f22-14a7-49f2-b3a7-c390a1b913fa">
+      <driver-ref>mysql.8</driver-ref>
+      <synchronize>true</synchronize>
+      <jdbc-driver>com.mysql.cj.jdbc.Driver</jdbc-driver>
+      <jdbc-url>jdbc:mysql://192.168.189.208:3306/NJJBXQ_DJGBZ</jdbc-url>
+    </data-source>
+    <data-source source="LOCAL" name="mysql_NJJBXQ_DJGBZ_BASEDATA" group="mysql" uuid="f3734612-b2f2-4574-a8f5-bc0b33b528e3">
+      <driver-ref>mysql.8</driver-ref>
+      <synchronize>true</synchronize>
+      <jdbc-driver>com.mysql.cj.jdbc.Driver</jdbc-driver>
+      <jdbc-url>jdbc:mysql://192.168.189.208:3306/NJJBXQ_DJGBZ_BASEDATA</jdbc-url>
+    </data-source>
+    <data-source source="LOCAL" name="mysql_NJJBXQ_DJGBZ_CREDIT" group="mysql" uuid="efd26057-9d16-4b1e-bdbc-acd7c9368295">
+      <driver-ref>mysql.8</driver-ref>
+      <synchronize>true</synchronize>
+      <jdbc-driver>com.mysql.cj.jdbc.Driver</jdbc-driver>
+      <jdbc-url>jdbc:mysql://192.168.189.208:3306/NJJBXQ_DJGBZ_CREDIT</jdbc-url>
+    </data-source>
+    <data-source source="LOCAL" name="ora_NJJBXQ_DJGBZ_CREDIT" group="ora" uuid="ecc241ef-9d49-409a-9d88-85bf64dcd1ef">
+      <driver-ref>oracle</driver-ref>
+      <synchronize>true</synchronize>
+      <auto-commit>false</auto-commit>
+      <jdbc-driver>oracle.jdbc.OracleDriver</jdbc-driver>
+      <jdbc-url>jdbc:oracle:thin:@//192.168.189.208:1522/orcl11g</jdbc-url>
+    </data-source>
+    <data-source source="LOCAL" name="ora_NJJBXQ_DJGBZ_ZLAQ" group="ora" uuid="3cde6fda-a431-46db-8787-217dcf0c5815">
+      <driver-ref>oracle</driver-ref>
+      <synchronize>true</synchronize>
+      <auto-commit>false</auto-commit>
+      <jdbc-driver>oracle.jdbc.OracleDriver</jdbc-driver>
+      <jdbc-url>jdbc:oracle:thin:@//192.168.189.208:1522/orcl11g</jdbc-url>
+    </data-source>
+    <data-source source="LOCAL" name="mysql_NJJBXQ_DJGBZ_ZLAQ" group="mysql" uuid="560aeabd-fb3a-4626-81fd-260186ff9799">
+      <driver-ref>mysql.8</driver-ref>
+      <synchronize>true</synchronize>
+      <jdbc-driver>com.mysql.cj.jdbc.Driver</jdbc-driver>
+      <jdbc-url>jdbc:mysql://192.168.189.208:3306/NJJBXQ_DJGBZ_ZLAQ</jdbc-url>
+    </data-source>
+    <data-source source="LOCAL" name="mysql_cnsbzb_v8_test" group="mysql" uuid="a874f2a1-cebb-496e-8fe3-1916fa3bf155">
+      <driver-ref>mysql.8</driver-ref>
+      <synchronize>true</synchronize>
+      <jdbc-driver>com.mysql.cj.jdbc.Driver</jdbc-driver>
+      <jdbc-url>jdbc:mysql://192.168.189.208:3306/cnsbzb_v8_test</jdbc-url>
+    </data-source>
+    <data-source source="LOCAL" name="ora_cnsbzb_v8_test" group="ora" uuid="b4f2f1e3-ead5-4ed1-a37f-01e49e29c574">
+      <driver-ref>oracle</driver-ref>
+      <synchronize>true</synchronize>
+      <auto-commit>false</auto-commit>
+      <jdbc-driver>oracle.jdbc.OracleDriver</jdbc-driver>
+      <jdbc-url>jdbc:oracle:thin:@//192.168.189.208:1522/orcl11g</jdbc-url>
+    </data-source>
+    <data-source source="LOCAL" name="mysql_ZJGSALVATION" group="mysql" uuid="cd1881b3-e1a1-4c4a-928f-533180b87f9e">
+      <driver-ref>mysql.8</driver-ref>
+      <synchronize>true</synchronize>
+      <jdbc-driver>com.mysql.cj.jdbc.Driver</jdbc-driver>
+      <jdbc-url>jdbc:mysql://192.168.189.208:3306/ZJGSALVATION</jdbc-url>
+    </data-source>
+    <data-source source="LOCAL" name="oracle_ZJGSALVATION" group="ora" uuid="26ca9911-2312-4b80-b2fb-8d25e235d9a2">
+      <driver-ref>oracle</driver-ref>
+      <synchronize>true</synchronize>
+      <auto-commit>false</auto-commit>
+      <jdbc-driver>oracle.jdbc.OracleDriver</jdbc-driver>
+      <jdbc-url>jdbc:oracle:thin:@//192.168.189.208:1522/orcl11g</jdbc-url>
+    </data-source>
+    <data-source source="LOCAL" name="admin@192.168.212.245" group="postgresql" uuid="3e296b65-6457-4ee4-9b45-e71c41e8577d">
+      <driver-ref>postgresql</driver-ref>
+      <synchronize>true</synchronize>
+      <remarks>password_11111</remarks>
+      <jdbc-driver>org.postgresql.Driver</jdbc-driver>
+      <jdbc-url>jdbc:postgresql://192.168.212.245:5432/admin</jdbc-url>
+    </data-source>
+    <data-source source="LOCAL" name="mysql_test" group="mysql" uuid="7fc3f7b3-9cc2-4f84-bf5e-9ae1bd6d6cab">
+      <driver-ref>mysql.8</driver-ref>
+      <synchronize>true</synchronize>
+      <jdbc-driver>com.mysql.cj.jdbc.Driver</jdbc-driver>
+      <jdbc-url>jdbc:mysql://192.168.189.208:3306/test</jdbc-url>
+    </data-source>
+    <data-source source="LOCAL" name="ora_admin" group="ora" uuid="8859a118-cd80-4d6b-9e18-359549b60fd3">
+      <driver-ref>oracle</driver-ref>
+      <synchronize>true</synchronize>
+      <remarks>admin/oracle</remarks>
+      <auto-commit>false</auto-commit>
+      <jdbc-driver>oracle.jdbc.OracleDriver</jdbc-driver>
+      <jdbc-url>jdbc:oracle:thin:@//192.168.189.208:1522/orcl11g</jdbc-url>
+    </data-source>
+  </component>
+</project>

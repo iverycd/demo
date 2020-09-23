@@ -10,9 +10,7 @@ print(c)
 print(d)
 print(v[0],v[1],v[2],v[3])
 print(bytes(v))
-print('ddss')
-print('ssasx')
-print('2')
+print('tesddtssss')
 '''
 
 print(b)  
