@@ -10,7 +10,7 @@ print(c)
 print(d)
 print(v[0],v[1],v[2],v[3])
 print(bytes(v))
-print('tesddtssss')
+print('hello')
 '''
 
 print(b)  
@@ -19,5 +19,5 @@ b = binascii.hexlify(a)
 print(b)  
 b'68656c6c6f20776f726c64'  
 print(binascii.unhexlify(b))  
-b'hello world'
+b'hello sdd'
 '''
