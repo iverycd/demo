@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
-# oracle_mig_mysql.py v1.3
+# oracle_mig_mysql.py v1.0 2020.9.24
 # Oracle database migration to MySQL
-"""表迁移的方法，先在源库查询每张表有几个列字段，生成插入到目标库的insert语句，以自定义批量插入方式插入到目标库"""
+"""
+1、目标库需要先创建好表结构
+2、实现了Oracle blob、nclob大字段插入到MySQL
+3、按照每张表顺序进行迁移，如遇字段溢出、类型不匹配等异常会中断
+"""
 import cx_Oracle
 import pymysql
 import os
