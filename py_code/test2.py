@@ -11,14 +11,4 @@ print(d)
 print(v[0],v[1],v[2],v[3])
 print(bytes(v))
 print('hello')
-print('x1')
-'''
-
-print(b)  
-b'68656c6c6f20776f726c64'  
-b = binascii.hexlify(a)  
-print(b)  
-b'68656c6c6f20776f726c64'  
-print(binascii.unhexlify(b))  
-b'hello sdd'
-'''
+print('第一个版本')
