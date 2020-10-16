@@ -2,9 +2,15 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.2
+# V1.3
 """
 MODIFY HISTORY
+****************************************************
+v1.3
+2020.10.16
+1、在线创建表结构、增加主键
+2、支持MySQL字符类型、时间类型、数值类型、大字段类型
+3、在线迁移数据（在迁移前可先收集下数据库的统计信息方便数值类型平均长度判断）
 ****************************************************
 v1.2
 2020.9.30
@@ -44,13 +50,14 @@ class Logger(object):
 
 sys.stdout = Logger(stream=sys.stdout)
 os.environ['NLS_LANG'] = 'SIMPLIFIED CHINESE_CHINA.UTF8'  # 设置字符集为UTF8，防止中文乱码
-source_db = cx_Oracle.connect('admin/oracle@192.168.189.208:1522/orcl11g')  # 源库
-target_db = pymysql.connect("192.168.189.208", "root", "Gepoint", "test")  # 目标库
+source_db = cx_Oracle.connect('test2/oracle@192.168.189.208:1522/orcl11g')  # 源库
+target_db = pymysql.connect("192.168.189.208", "root", "Gepoint", "test2")  # 目标库
 source_db_type = 'Oracle'  # 大小写无关，后面会被转为大写
 target_db_type = 'MySQL'  # 大小写无关，后面会被转为大写
 
 cur_select = source_db.cursor()  # 源库查询对象
 cur_insert = target_db.cursor()  # 目标库插入对象
+cur_drop_table = target_db.cursor()  # 在MySQL清除表 drop table if exists
 cur_select.arraysize = 5000  # 数据库游标对象结果集返回到客户端行数
 cur_insert.arraysize = 5000
 
@@ -72,10 +79,203 @@ source_db.outputtypehandler = OutputTypeHandler
 # source_table = input("请输入源表名称:")    # 手动从键盘获取源表名称
 # target_table = input("请输入目标表名称:")  # 手动从键盘获取目标表名称
 
-# 输出要迁移的表
+
+# 获取Oracle的主键字段
+def table_primary(table_name):
+    cur_table_primary = source_db.cursor()
+    cur_table_primary.execute("""SELECT cols.column_name FROM all_constraints cons, all_cons_columns cols
+                    WHERE cols.table_name = '%s' AND cons.constraint_type = 'P'
+                    AND cons.constraint_name = cols.constraint_name AND cons.owner = cols.owner
+                    ORDER BY cols.table_name""" % table_name)
+    result = []
+    for d in cur_table_primary:
+        result.append(d[0])
+    # print(result)
+    cur_table_primary.close()
+    return result  # 这里需要返回值
+
+
+# 获取Oracle的列字段类型以及字段长度以及映射数据类型到MySQL的规则
+def tbl_columns(table_name):
+    cur_tbl_columns = source_db.cursor()
+    cur_tbl_columns.execute("""SELECT A.COLUMN_NAME, A.DATA_TYPE, A.DATA_LENGTH, case when A.DATA_PRECISION is null then -1 else  A.DATA_PRECISION end DATA_PRECISION, case when A.DATA_SCALE is null then -1 else  A.DATA_SCALE end DATA_SCALE,  case when A.NULLABLE ='Y' THEN 'True' ELSE 'False' END as isnull, B.COMMENTS,A.DATA_DEFAULT,case when a.AVG_COL_LEN is null then -1 else a.AVG_COL_LEN end AVG_COL_LEN
+            FROM USER_TAB_COLUMNS A LEFT JOIN USER_COL_COMMENTS B 
+            ON A.TABLE_NAME=B.TABLE_NAME AND A.COLUMN_NAME=B.COLUMN_NAME 
+            WHERE A.TABLE_NAME='%s' ORDER BY COLUMN_ID ASC""" % table_name)
+    result = []
+    primary_key = table_primary(table_name)
+    for column in cur_tbl_columns:  # 按照游标行遍历字段
+        '''
+        result.append({'column_name': column[0],
+                       'type': column[1],
+                       'primary': column[0] in primary_key,
+                       'length': column[2],
+                       'precision': column[3],
+                       'scale': column[4],
+                       'nullable': column[5],
+                       'comment': column[6]})
+        '''
+        # 对游标cur_tbl_columns中每行的column[1]字段进行平行判断
+        # 字符类型映射规则，字符串类型映射为MySQL类型varchar(n)
+        if column[1] == 'VARCHAR2' or column[1] == 'CHAR' or column[1] == 'NCHAR' or column[1] == 'NVARCHAR2':
+            result.append({'fieldname': column[0],  # 如下为字段的属性值
+                           'type': 'VARCHAR' + '(' + str(column[2]) + ')',  # 列字段类型以及长度范围
+                           'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                           'default': column[7],  # 字段默认值
+                           'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                           }
+                          )
+        # 时间日期类型映射规则，Oracle date类型映射为MySQL类型datetime
+        elif column[1] == 'DATE' or column[1] == 'TIMESTAMP(6)':
+            # Oracle 默认值sysdate映射到MySQL默认值current_timestamp
+            if column[7] == 'sysdate':
+                result.append({'fieldname': column[0],  # 如下为字段的属性值
+                               'type': 'DATETIME',  # 列字段类型以及长度范围
+                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'default': 'current_timestamp()',  # 字段默认值
+                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               }
+                              )
+            # 其他时间日期默认值保持不变(原模原样对应)
+            else:
+                result.append({'fieldname': column[0],  # 如下为字段的属性值
+                               'type': 'DATETIME',  # 列字段类型以及长度范围
+                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'default': column[7],  # 字段默认值
+                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               }
+                              )
+
+        # 数值类型映射规则，判断Oracle number类型是否是浮点，是否是整数，转为MySQL的int或者decimal。下面分了3种情况区分整数与浮点
+        # column[n] == -1,即DATA_PRECISION，DATA_SCALE，AVG_COL_LEN为null，仅在如下if条件判断是否为空
+        elif column[1] == 'NUMBER':
+            # 浮点类型判断，如number(5,2)映射为MySQL的DECIMAL(5,2)
+            if column[3] > 0 and column[4] > 0:
+                result.append({'fieldname': column[0],
+                               'type': 'DECIMAL' + '(' + str(column[3]) + ',' + str(column[4]) + ')',  # 列字段类型以及长度范围
+                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'default': column[7],  # 字段默认值
+                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               }
+                              )
+            # 整数类型判断，如number(20,0)，如果AVG_COL_LEN比较大，映射为MySQL的bigint
+            elif column[3] > 0 and column[4] == 0 and column[8] >= 6:
+                result.append({'fieldname': column[0],
+                               'type': 'BIGINT',  # 列字段类型以及长度范围
+                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'default': column[7],  # 字段默认值
+                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               }
+                              )
+            # 整数类型判断，如number(10,0)，如果AVG_COL_LEN比较小，映射为MySQL的int
+            elif column[3] > 0 and column[4] == 0 and column[8] < 6:
+                result.append({'fieldname': column[0],
+                               'type': 'INT',  # 列字段类型以及长度范围
+                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'default': column[7],  # 字段默认值
+                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               }
+                              )
+            # 整数类型判断，如id number,若AVG_COL_LEN比较大，映射为MySQL的bigint
+            elif column[3] == -1 and column[4] == -1 and column[8] >= 6:
+                result.append({'fieldname': column[0],
+                               'type': 'BIGINT',  # 列字段类型以及长度范围
+                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'default': column[7],  # 字段默认值
+                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               }
+                              )
+            # 整数类型判断，如id number,若AVG_COL_LEN比较小，映射为MySQL的int
+            elif column[3] == -1 and column[4] == -1 and column[8] < 6:
+                result.append({'fieldname': column[0],
+                               'type': 'INT',  # 列字段类型以及长度范围
+                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'default': column[7],  # 字段默认值
+                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               }
+                              )
+            # int整数类型判断，如id number,若AVG_COL_LEN比较大，映射为MySQL的bigint
+            elif column[3] == -1 and column[4] == 0 and column[8] >= 6:
+                result.append({'fieldname': column[0],
+                               'type': 'BIGINT',  # 列字段类型以及长度范围
+                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'default': column[7],  # 字段默认值
+                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               }
+                              )
+            # int整数类型判断，如id number,若AVG_COL_LEN比较小，映射为MySQL的int
+            elif column[3] == -1 and column[4] == 0 and column[8] < 6:
+                result.append({'fieldname': column[0],
+                               'type': 'INT',  # 列字段类型以及长度范围
+                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'default': column[7],  # 字段默认值
+                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               }
+                              )
+        # 大字段映射规则，文本类型大字段映射为MySQL类型longtext
+        elif column[1] == 'CLOB' or column[1] == 'NCLOB' or column[1] == 'LONG':
+            result.append({'fieldname': column[0],  # 如下为字段的属性值
+                           'type': 'LONGTEXT',  # 列字段类型以及长度范围
+                           'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                           'default': column[7],  # 字段默认值
+                           'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                           }
+                          )
+        # 大字段映射规则，16进制类型大字段映射为MySQL类型longblob
+        elif column[1] == 'BLOB' or column[1] == 'RAW' or column[1] == 'LONG RAW':
+            result.append({'fieldname': column[0],  # 如下为字段的属性值
+                           'type': 'LONGBLOB',  # 列字段类型以及长度范围
+                           'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                           'default': column[7],  # 字段默认值
+                           'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                           }
+                          )
+        else:
+            result.append({'fieldname': column[0],  # 如果是非大字段类型，通过括号加上字段类型长度范围
+                           'type': column[1] + '(' + str(column[2]) + ')',  # 列字段类型以及长度范围
+                           'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                           'default': column[7],  # 字段默认值
+                           'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                           }
+
+                          )
+    # print(result)
+    cur_tbl_columns.close()
+    return result
+
+
+# 获取在MySQL创建目标表的DDL、增加主键
+def create_table(table_name):  # new_tbl：即将创建的新表, meta_tbl：源表的表名
+    # 在MySQL创建表前先删除存在的表
+    drop_target_table = 'drop table if exists ' + table_name
+    cur_drop_table.execute(drop_target_table)
+    cur_createtbl = target_db.cursor()
+    fieldinfos = []
+    structs = tbl_columns(table_name)  # 获取源表的表字段信息
+    v_pri_key = table_primary(table_name)  # 获取源表的主键字段
+    # 以下字段已映射为MySQL字段类型
+    for struct in structs:
+        defaultvalue = struct.get('default')
+        if defaultvalue:
+            defaultvalue = "'{0}'".format(defaultvalue) if type(defaultvalue) == 'str' else str(defaultvalue)
+        fieldinfos.append('{0} {1} {2} {3}'.format(struct['fieldname'],
+                                                   struct['type'],
+                                                   # 'primary key' if struct.get('primary') else '',主键在创建表的时候定义
+                                                   # ('default ' + '\'' + defaultvalue + '\'') if defaultvalue else '',
+                                                   ('default ' + defaultvalue) if defaultvalue else '',
+                                                   '' if struct.get('isnull') else 'not null'))
+    create_table_sql = 'create table {0} ({1})'.format(table_name, ','.join(fieldinfos))  # 生成创建目标表的sql
+    add_pri_key_sql = 'alter table {0} add primary key ({1})'.format(table_name, ','.join(v_pri_key))  # 创建目标表之后增加主键
+    cur_createtbl.execute(create_table_sql)
+    if v_pri_key:
+        cur_createtbl.execute(add_pri_key_sql)
+
+
+# 仅输出Oracle当前用户的表，即user_tables的table_name
 def print_table():
     cur_tblprt = source_db.cursor()  # 生成用于输出表名的游标对象
-    tableoutput_sql = 'select table_name from user_tables  where table_name in (\'TEST4\',\'TEST3\',\'TEST2\') order by table_name  desc'  # 查询需要导出的表
+    #   where table_name in (\'TEST4\',\'TEST3\',\'TEST2\')
+    tableoutput_sql = 'select table_name from user_tables  order by table_name  desc'  # 查询需要导出的表
     cur_tblprt.execute(tableoutput_sql)  # 执行
     filename = '/tmp/table_name.csv'
     f = open(filename, 'w')
@@ -85,7 +285,7 @@ def print_table():
     f.close()
 
 
-# 输出迁移失败的表
+# 仅输出迁移失败的表
 def print_failed_table(table_name):
     filename = '/tmp/failed_table.csv'
     f = open(filename, 'a', encoding='utf-8')
@@ -93,7 +293,7 @@ def print_failed_table(table_name):
     f.close()
 
 
-# 表插入方法
+# 批量将Oracle数据插入到MySQL的方法
 def mig_table(tablename, write_fail):
     target_table = source_table = tablename
     if source_db_type.upper() == 'ORACLE':
@@ -138,10 +338,23 @@ def mig_table(tablename, write_fail):
     print('目标插入总数:', target_effectrow)
 
 
-# 从csv文件读取源库需要迁移的表，通过循环进行所有表的迁移
-def mig_database():
-    print_table()  # 读取要迁移的表，csv文件
+# 在MySQL创建表结构以及添加主键
+def create_meta_table():
     filename = '/tmp/table_name.csv'
+    with open(filename) as f:
+        reader = csv.reader(f)
+        for row in reader:
+            tbl_name = row[0]
+            print("\033[31m开始创建表：\033[0m\n")
+            print(tbl_name)
+            create_table(tbl_name)
+            print(tbl_name + '表创建完毕', time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), '\n')
+    f.close()
+
+
+# 从csv文件读取源库需要迁移的表，调用mig_table(tbl_name, 1)，插入表数据，并输出迁移失败的表
+def mig_database():
+    filename = '/tmp/table_name.csv'  # 读取要迁移的表，csv文件
     with open(filename) as f:
         reader = csv.reader(f)
         for row in reader:
@@ -164,7 +377,7 @@ def mig_database():
     f.close()
 
 
-# 再次迁移失败的表
+# 仅用于迁移数据插入失败的表
 def mig_failed_table():
     filename = '/tmp/failed_table.csv'
     with open(filename) as f:
@@ -173,41 +386,50 @@ def mig_failed_table():
             tbl_name = row[0]
             print("\033[31m开始迁移：\033[0m" + tbl_name)
             mig_table(tbl_name, 0)
-            is_continue = input('是否迁移失败的表：Y|N\n')
+            is_continue = input('是否结束：Y|N\n')
+            print(tbl_name + '插入完毕', time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+            '''
             if is_continue == 'Y' or is_continue == 'y':
-                continue
+                print() #  continue
             else:
                 print(tbl_name + '插入完毕', time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
                 sys.exit()
+            '''
     f.close()
 
 
 if __name__ == '__main__':
     starttime = datetime.datetime.now()
-    path = '/tmp/failed_table.csv'  # 迁移失败的表csv路径，每次迁移表前先清除失败的表csv文件
-    if os.path.exists(path):  # 如果文件存在
+    path = '/tmp/failed_table.csv'  # 迁移失败的表
+    if os.path.exists(path):  # 如果文件存在，每次迁移表前先清除失败的表csv文件
         os.remove(path)  # 删除文件
-    mig_database()
+    print_table()  # 1、生成Oracle要迁移的表写入到csv文件
+    create_meta_table()  # 2、创建表结构
+    mig_database()  # 3、迁移数据
     endtime = datetime.datetime.now()
     print("Oracle迁移数据到MySQL完毕,一共耗时" + str((endtime - starttime).seconds) + "秒")
     print('-' * 100)
-    print("迁移失败的表如下：")
-    filename = '/tmp/failed_table.csv'  # 输出迁移失败的表
-    with open(filename, "r") as f:
-        data = f.read()  # 读取文件
-        print(data)
-    f.close()
-    print('-' * 100)
-    print('请检查失败的表DDL以及约束')
-    is_continue = input('是否再次迁移失败的表：Y|N\n')
-    if is_continue == 'Y' or is_continue == 'y':
-        try:
-            print('开始重新迁移失败的表\n')
-            mig_failed_table()
-        except Exception as e:
-            print('插入失败')
+    if os.path.exists(path):  # 判断下/tmp/failed_table.csv是否存在，没有就是没有迁移错误
+        print("迁移失败的表如下：")
+        filename = '/tmp/failed_table.csv'  # 输出这次迁移失败的表
+        with open(filename, "r") as f:
+            data = f.read()  # 读取文件
+            print(data)
+        f.close()
+        print('-' * 100)
+        print('请检查失败的表DDL以及约束')
+        is_continue = input('是否再次迁移失败的表：Y|N\n')
+        if is_continue == 'Y' or is_continue == 'y':
+            try:
+                print('开始重新迁移失败的表\n')
+                mig_failed_table()
+            except Exception as e:
+                print('插入失败')
+        else:
+            print('迁移完毕！')
     else:
-        print('迁移完毕！')
+        print('迁移成功，没有迁移失败的表')
+
 
 cur_select.close()
 cur_insert.close()
