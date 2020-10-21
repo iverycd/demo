@@ -2,9 +2,15 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.3
+# V1.3.1
 """
 MODIFY HISTORY
+****************************************************
+v1.3.1
+2020.10.21
+1、使用cx_Oracle增加NumberToDecimal的handler处理
+2、修正Oracle浮点类型数据保留小数位问题(小数位超过4位的number类型数据插入到MySQL数据不准确)
+3、优化数据库连接以及游标对象名称
 ****************************************************
 v1.3
 2020.10.16
@@ -32,6 +38,7 @@ import csv
 import datetime
 import sys
 import traceback
+import decimal
 
 
 # 记录执行日志
@@ -50,16 +57,17 @@ class Logger(object):
 
 sys.stdout = Logger(stream=sys.stdout)
 os.environ['NLS_LANG'] = 'SIMPLIFIED CHINESE_CHINA.UTF8'  # 设置字符集为UTF8，防止中文乱码
-source_db = cx_Oracle.connect('test2/oracle@192.168.189.208:1522/orcl11g')  # 源库
-target_db = pymysql.connect("192.168.189.208", "root", "Gepoint", "test2")  # 目标库
+source_db = cx_Oracle.connect('test2/oracle@192.168.189.208:1522/orcl11g')  # 源库Oracle的数据库连接
+target_db = pymysql.connect("192.168.189.208", "root", "Gepoint", "test2")  # 目标库MySQL的数据库连接
 source_db_type = 'Oracle'  # 大小写无关，后面会被转为大写
 target_db_type = 'MySQL'  # 大小写无关，后面会被转为大写
 
-cur_select = source_db.cursor()  # 源库查询对象
-cur_insert = target_db.cursor()  # 目标库插入对象
+cur_select = source_db.cursor()  # 源库Oracle查询源表有几列
+cur_oracle_result = source_db.cursor()  # 查询Oracle源表的游标结果集
+cur_insert_mysql = target_db.cursor()  # 目标库MySQL插入目标表执行的插入sql
 cur_drop_table = target_db.cursor()  # 在MySQL清除表 drop table if exists
-cur_select.arraysize = 5000  # 数据库游标对象结果集返回到客户端行数
-cur_insert.arraysize = 5000
+cur_oracle_result.arraysize = 5000  # Oracle数据库游标对象结果集返回的行数即每次获取多少行
+cur_insert_mysql.arraysize = 5000  # MySQL数据库批量插入的行数
 
 
 # clob、blob、nclob要在读取源表前加载outputtypehandler属性
@@ -74,6 +82,17 @@ def OutputTypeHandler(cursor, name, defaultType, size, precision, scale):
 
 # 源库的连接对象需要加载outputtypehandler属性
 source_db.outputtypehandler = OutputTypeHandler
+
+
+# 处理Oracle的number类型浮点数据与Python decimal类型的转换
+# Python遇到超过3位小数的浮点类型，小数部分只能保留3位，声音会被截断，会造成数据不准确，需要用此handler做转换，可指定数据库连接或者游标对象
+
+def NumberToDecimal(cursor, name, defaultType, size, precision, scale):
+    if defaultType == cx_Oracle.DB_TYPE_NUMBER:
+        return cursor.var(decimal.Decimal, arraysize=cursor.arraysize)
+
+
+cur_oracle_result.outputtypehandler = NumberToDecimal
 
 
 # source_table = input("请输入源表名称:")    # 手动从键盘获取源表名称
@@ -194,7 +213,7 @@ def tbl_columns(table_name):
                                'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
                                }
                               )
-            # int整数类型判断，如id number,若AVG_COL_LEN比较大，映射为MySQL的bigint
+            # int整数类型判断，如id int,(oracle的int会自动转为number),若AVG_COL_LEN比较大，映射为MySQL的bigint
             elif column[3] == -1 and column[4] == 0 and column[8] >= 6:
                 result.append({'fieldname': column[0],
                                'type': 'BIGINT',  # 列字段类型以及长度范围
@@ -203,7 +222,7 @@ def tbl_columns(table_name):
                                'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
                                }
                               )
-            # int整数类型判断，如id number,若AVG_COL_LEN比较小，映射为MySQL的int
+            # int整数类型判断，如id int,(oracle的int会自动转为number)若AVG_COL_LEN比较小，映射为MySQL的int
             elif column[3] == -1 and column[4] == 0 and column[8] < 6:
                 result.append({'fieldname': column[0],
                                'type': 'INT',  # 列字段类型以及长度范围
@@ -312,16 +331,17 @@ def mig_table(tablename, write_fail):
         val_str = val_str + ':' + str(col_len)  # Oracle批量插入语法是 insert into tb_name values(:1,:2,:3)
     insert_sql = 'insert into ' + target_table + ' values(' + val_str + ')'  # 拼接insert into 目标表 values  #目标表插入语句
     select_sql = 'select * from ' + source_table  # 源查询SQL，如果有where过滤条件，在这里拼接
-    cur_select.execute(select_sql)  # 执行
+    cur_oracle_result.execute(select_sql)  # 执行
     print("\033[31m正在执行插入表:\033[0m", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
     source_effectrow = 0
     target_effectrow = 0
     while True:
         rows = list(
-            cur_select.fetchmany(
-                5000))  # 每次获取2000行，由cur_select.arraysize值决定，MySQL fetchmany 返回的是 tuple 数据类型 所以用list做类型转换
+            cur_oracle_result.fetchmany(
+                5000))  # 每次获取2000行，cur_oracle_result.arraysize值决定，MySQL fetchmany 返回的是 tuple 数据类型 所以用list做类型转换
+        #  print(cur_oracle_result.description)  # 打印Oracle查询结果集字段列表以及类型
         try:
-            cur_insert.executemany(insert_sql, rows)  # 批量插入每次2000行，需要注意的是 rows 必须是 list [] 数据类型
+            cur_insert_mysql.executemany(insert_sql, rows)  # 批量插入每次5000行，需要注意的是 rows 必须是 list [] 数据类型
             target_db.commit()  # 提交
         except Exception as e:
             print(traceback.format_exc())  # 遇到异常记录到log，会继续迁移下张表
@@ -332,8 +352,8 @@ def mig_table(tablename, write_fail):
                 continue
         if not rows:
             break  # 当前表游标获取不到数据之后中断循环，返回到mig_database，可以继续下个表
-        source_effectrow = cur_select.rowcount  # 计数源表插入的行数
-        target_effectrow = target_effectrow + cur_insert.rowcount  # 计数目标表插入的行数
+        source_effectrow = cur_oracle_result.rowcount  # 计数源表插入的行数
+        target_effectrow = target_effectrow + cur_insert_mysql.rowcount  # 计数目标表插入的行数
     print('源表查询总数:', source_effectrow)
     print('目标插入总数:', target_effectrow)
 
@@ -430,8 +450,7 @@ if __name__ == '__main__':
     else:
         print('迁移成功，没有迁移失败的表')
 
-
 cur_select.close()
-cur_insert.close()
+cur_insert_mysql.close()
 source_db.close()
 target_db.close()
