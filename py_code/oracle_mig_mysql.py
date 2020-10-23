@@ -2,9 +2,16 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.3.1
+# V1.3.2
 """
 MODIFY HISTORY
+****************************************************
+v1.3.2
+2020.10.23
+1、优化lob、number类handler
+2、优化主键查询方式
+3、修改varchar2超过2000字节字段映射为MySQL tinytext
+4、修正number、date类型默认值中包含括号等问题
 ****************************************************
 v1.3.1
 2020.10.21
@@ -39,6 +46,7 @@ import datetime
 import sys
 import traceback
 import decimal
+import re
 
 
 # 记录执行日志
@@ -70,29 +78,21 @@ cur_oracle_result.arraysize = 5000  # Oracle数据库游标对象结果集返回
 cur_insert_mysql.arraysize = 5000  # MySQL数据库批量插入的行数
 
 
-# clob、blob、nclob要在读取源表前加载outputtypehandler属性
-def OutputTypeHandler(cursor, name, defaultType, size, precision, scale):
+# clob、blob、nclob要在读取源表前加载outputtypehandler属性,即将Oracle大字段转为string类型
+# 处理Oracle的number类型浮点数据与Python decimal类型的转换
+# Python遇到超过3位小数的浮点类型，小数部分只能保留3位，其余会被截断，会造成数据不准确，需要用此handler做转换，可指定数据库连接或者游标对象
+def dataconvert(cursor, name, defaultType, size, precision, scale):
     if defaultType == cx_Oracle.DB_TYPE_CLOB:
         return cursor.var(cx_Oracle.DB_TYPE_LONG, arraysize=cursor.arraysize)
     if defaultType == cx_Oracle.DB_TYPE_BLOB:
         return cursor.var(cx_Oracle.DB_TYPE_LONG_RAW, arraysize=cursor.arraysize)
     if defaultType == cx_Oracle.DB_TYPE_NCLOB:
         return cursor.var(cx_Oracle.DB_TYPE_LONG, arraysize=cursor.arraysize)
-
-
-# 源库的连接对象需要加载outputtypehandler属性
-source_db.outputtypehandler = OutputTypeHandler
-
-
-# 处理Oracle的number类型浮点数据与Python decimal类型的转换
-# Python遇到超过3位小数的浮点类型，小数部分只能保留3位，声音会被截断，会造成数据不准确，需要用此handler做转换，可指定数据库连接或者游标对象
-
-def NumberToDecimal(cursor, name, defaultType, size, precision, scale):
-    if defaultType == cx_Oracle.DB_TYPE_NUMBER:
+    if defaultType == cx_Oracle.DB_TYPE_NUMBER:  # NumberToDecimal
         return cursor.var(decimal.Decimal, arraysize=cursor.arraysize)
 
 
-cur_oracle_result.outputtypehandler = NumberToDecimal
+cur_oracle_result.outputtypehandler = dataconvert
 
 
 # source_table = input("请输入源表名称:")    # 手动从键盘获取源表名称
@@ -102,7 +102,7 @@ cur_oracle_result.outputtypehandler = NumberToDecimal
 # 获取Oracle的主键字段
 def table_primary(table_name):
     cur_table_primary = source_db.cursor()
-    cur_table_primary.execute("""SELECT cols.column_name FROM all_constraints cons, all_cons_columns cols
+    cur_table_primary.execute("""SELECT cols.column_name FROM user_constraints cons, user_cons_columns cols
                     WHERE cols.table_name = '%s' AND cons.constraint_type = 'P'
                     AND cons.constraint_name = cols.constraint_name AND cons.owner = cols.owner
                     ORDER BY cols.table_name""" % table_name)
@@ -137,17 +137,27 @@ def tbl_columns(table_name):
         # 对游标cur_tbl_columns中每行的column[1]字段进行平行判断
         # 字符类型映射规则，字符串类型映射为MySQL类型varchar(n)
         if column[1] == 'VARCHAR2' or column[1] == 'CHAR' or column[1] == 'NCHAR' or column[1] == 'NVARCHAR2':
-            result.append({'fieldname': column[0],  # 如下为字段的属性值
-                           'type': 'VARCHAR' + '(' + str(column[2]) + ')',  # 列字段类型以及长度范围
-                           'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
-                           'default': column[7],  # 字段默认值
-                           'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
-                           }
-                          )
+            if column[2] >= 2000:
+                result.append({'fieldname': column[0],  # 如下为字段的属性值
+                               'type': 'TINYTEXT',  # 列字段类型以及长度范围
+                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'default': column[7],  # 字段默认值
+                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               }
+                              )
+            else:
+                result.append({'fieldname': column[0],  # 如下为字段的属性值
+                               'type': 'VARCHAR' + '(' + str(column[2]) + ')',  # 列字段类型以及长度范围
+                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'default': column[7],  # 字段默认值
+                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               }
+                              )
+
         # 时间日期类型映射规则，Oracle date类型映射为MySQL类型datetime
         elif column[1] == 'DATE' or column[1] == 'TIMESTAMP(6)':
             # Oracle 默认值sysdate映射到MySQL默认值current_timestamp
-            if column[7] == 'sysdate':
+            if column[7] == 'sysdate' or column[7] == '( (SYSDATE) )':
                 result.append({'fieldname': column[0],  # 如下为字段的属性值
                                'type': 'DATETIME',  # 列字段类型以及长度范围
                                'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
@@ -179,58 +189,117 @@ def tbl_columns(table_name):
                               )
             # 整数类型判断，如number(20,0)，如果AVG_COL_LEN比较大，映射为MySQL的bigint
             elif column[3] > 0 and column[4] == 0 and column[8] >= 6:
-                result.append({'fieldname': column[0],
-                               'type': 'BIGINT',  # 列字段类型以及长度范围
-                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
-                               'default': column[7],  # 字段默认值
-                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
-                               }
-                              )
+                if not column[7]:  # 数据库中number字段类型默认值为null
+                    result.append({'fieldname': column[0],
+                                   'type': 'BIGINT',  # 列字段类型以及长度范围
+                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'default': column[7],  # 字段默认值,正则方式仅提取数字
+                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   }
+                                  )
+                else:
+                    result.append({'fieldname': column[0],
+                                   'type': 'BIGINT',  # 列字段类型以及长度范围
+                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值,正则方式仅提取数字
+                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   }
+                                  )
+
             # 整数类型判断，如number(10,0)，如果AVG_COL_LEN比较小，映射为MySQL的int
             elif column[3] > 0 and column[4] == 0 and column[8] < 6:
-                result.append({'fieldname': column[0],
-                               'type': 'INT',  # 列字段类型以及长度范围
-                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
-                               'default': column[7],  # 字段默认值
-                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
-                               }
-                              )
+                if not column[7]:  # 数据库中number字段类型默认值为null
+                    result.append({'fieldname': column[0],
+                                   'type': 'INT',  # 列字段类型以及长度范围
+                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'default': column[7],  # 字段默认值
+                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   }
+                                  )
+                else:
+                    result.append({'fieldname': column[0],
+                                   'type': 'INT',  # 列字段类型以及长度范围
+                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值
+                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   }
+                                  )
+
             # 整数类型判断，如id number,若AVG_COL_LEN比较大，映射为MySQL的bigint
             elif column[3] == -1 and column[4] == -1 and column[8] >= 6:
-                result.append({'fieldname': column[0],
-                               'type': 'BIGINT',  # 列字段类型以及长度范围
-                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
-                               'default': column[7],  # 字段默认值
-                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
-                               }
-                              )
+                if not column[7]:  # 数据库中number字段类型默认值为null
+                    result.append({'fieldname': column[0],
+                                   'type': 'BIGINT',  # 列字段类型以及长度范围
+                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'default': column[7],  # 字段默认值
+                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   }
+                                  )
+                else:
+                    result.append({'fieldname': column[0],
+                                   'type': 'BIGINT',  # 列字段类型以及长度范围
+                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值
+                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   }
+                                  )
+
             # 整数类型判断，如id number,若AVG_COL_LEN比较小，映射为MySQL的int
             elif column[3] == -1 and column[4] == -1 and column[8] < 6:
-                result.append({'fieldname': column[0],
-                               'type': 'INT',  # 列字段类型以及长度范围
-                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
-                               'default': column[7],  # 字段默认值
-                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
-                               }
-                              )
+                if not column[7]:  # 数据库中number字段类型默认值为null
+                    result.append({'fieldname': column[0],
+                                   'type': 'INT',  # 列字段类型以及长度范围
+                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'default': column[7],  # 字段默认值
+                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   }
+                                  )
+                else:  # number字段类型正则提取默认值数字部分
+                    result.append({'fieldname': column[0],
+                                   'type': 'INT',  # 列字段类型以及长度范围
+                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值
+                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   }
+                                  )
+
             # int整数类型判断，如id int,(oracle的int会自动转为number),若AVG_COL_LEN比较大，映射为MySQL的bigint
             elif column[3] == -1 and column[4] == 0 and column[8] >= 6:
-                result.append({'fieldname': column[0],
-                               'type': 'BIGINT',  # 列字段类型以及长度范围
-                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
-                               'default': column[7],  # 字段默认值
-                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
-                               }
-                              )
+                if not column[7]:  # 数据库中number字段类型默认值为null
+                    result.append({'fieldname': column[0],
+                                   'type': 'BIGINT',  # 列字段类型以及长度范围
+                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'default': column[7],  # 字段默认值
+                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   }
+                                  )
+                else:
+                    result.append({'fieldname': column[0],
+                                   'type': 'BIGINT',  # 列字段类型以及长度范围
+                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值
+                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   }
+                                  )
+
             # int整数类型判断，如id int,(oracle的int会自动转为number)若AVG_COL_LEN比较小，映射为MySQL的int
             elif column[3] == -1 and column[4] == 0 and column[8] < 6:
-                result.append({'fieldname': column[0],
-                               'type': 'INT',  # 列字段类型以及长度范围
-                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
-                               'default': column[7],  # 字段默认值
-                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
-                               }
-                              )
+                if not column[7]:  # 数据库中number字段类型默认值为null
+                    result.append({'fieldname': column[0],
+                                   'type': 'INT',  # 列字段类型以及长度范围
+                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'default': column[7],  # 字段默认值
+                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   }
+                                  )
+                else:
+                    result.append({'fieldname': column[0],
+                                   'type': 'INT',  # 列字段类型以及长度范围
+                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值
+                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   }
+                                  )
         # 大字段映射规则，文本类型大字段映射为MySQL类型longtext
         elif column[1] == 'CLOB' or column[1] == 'NCLOB' or column[1] == 'LONG':
             result.append({'fieldname': column[0],  # 如下为字段的属性值
@@ -285,6 +354,7 @@ def create_table(table_name):  # new_tbl：即将创建的新表, meta_tbl：源
                                                    '' if struct.get('isnull') else 'not null'))
     create_table_sql = 'create table {0} ({1})'.format(table_name, ','.join(fieldinfos))  # 生成创建目标表的sql
     add_pri_key_sql = 'alter table {0} add primary key ({1})'.format(table_name, ','.join(v_pri_key))  # 创建目标表之后增加主键
+    print(create_table_sql)
     cur_createtbl.execute(create_table_sql)
     if v_pri_key:
         cur_createtbl.execute(add_pri_key_sql)
