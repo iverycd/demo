@@ -1,82 +1,138 @@
 import cx_Oracle
 import pymysql
-import os
-import time
-import sys
 
-# 不带循环
-# 说明：本脚本用于Oracle与MySQL之间的数据迁移
-# 注意：源表与目标表字段数量必须一致
-# 使用：脚本默认是从MySQL迁移到Oracle,如果想从Oracle迁移到MySQL,修改source_db,target_db,source_db_type,target_db_type就行
-os.environ['NLS_LANG'] = 'SIMPLIFIED CHINESE_CHINA.UTF8'  # 设置字符集为UTF8，防止中文乱码
-
-'''
-mysql to oracle
-source_db = pymysql.connect("192.168.56.101", "scott", "tiger", "test")  # 源库
-target_db = cx_Oracle.connect('scott/tiger@192.168.3.13/orcl')  # 目标库
-source_db_type = 'MySQL'  # 大小写无关，后面会被转为大写
-target_db_type = 'Oracle'  # 大小写无关，后面会被转为大写
-'''
-
-# oracle to mysql
-source_db = cx_Oracle.connect('NJJBXQ_DJGBZ/11111@192.168.189.208:1522/orcl11g')  # 源库
-target_db = pymysql.connect("192.168.189.208", "root", "Gepoint", "NJJBXQ_DJGBZ")  # 目标库
-source_db_type = 'Oracle'  # 大小写无关，后面会被转为大写
-target_db_type = 'MySQL'  # 大小写无关，后面会被转为大写
-
-cur_select = source_db.cursor()  # 源库查询对象
-cur_insert = target_db.cursor()  # 目标库插入对象
-cur_select.arraysize = 2000
-cur_insert.arraysize = 2000
-
-source_table = input("请输入源表名称:")  # 从键盘获取源表名称
-target_table = input("请输入目标表名称:")  # 从键盘获取目标表名称
-
-# source_table = target_table = sys.argv[1]
+source_db = cx_Oracle.connect('admin/oracle@192.168.189.208:1522/orcl11g', encoding="UTF-8")
+target_db = pymysql.connect("192.168.189.208", "root", "Gepoint", "test")  # 目标库
 
 
-# 要在读blob之前加载outputtypehandler属性
-def OutputTypeHandler(cursor, name, defaultType, size, precision, scale):
-    if defaultType == cx_Oracle.DB_TYPE_CLOB:
-        return cursor.var(cx_Oracle.DB_TYPE_LONG, arraysize=cursor.arraysize)
-    if defaultType == cx_Oracle.DB_TYPE_BLOB:
-        return cursor.var(cx_Oracle.DB_TYPE_LONG_RAW, arraysize=cursor.arraysize)
-    if defaultType == cx_Oracle.DB_TYPE_NCLOB:
-        return cursor.var(cx_Oracle.DB_TYPE_LONG, arraysize=cursor.arraysize)
+# 返回源表的主键字段
+def table_primary(table_name):
+    cur_table_primary = source_db.cursor()
+    cur_table_primary.execute("""SELECT cols.column_name FROM all_constraints cons, all_cons_columns cols
+                    WHERE cols.table_name = '%s' AND cons.constraint_type = 'P'
+                    AND cons.constraint_name = cols.constraint_name AND cons.owner = cols.owner
+                    ORDER BY cols.table_name""" % table_name)
+    result = []
+    for d in cur_table_primary:
+        result.append(d[0])
+    # print(result)
+    cur_table_primary.close()
+    return result  # 这里需要返回值
 
 
-# 要在读blob之前加载outputtypehandler属性
-source_db.outputtypehandler = OutputTypeHandler
+# 返回源表的列字段以及MySQL字段类型映射判断
+def tbl_columns(table_name):
+    cur_tbl_columns = source_db.cursor()
+    cur_tbl_columns.execute("""SELECT A.COLUMN_NAME, A.DATA_TYPE, A.DATA_LENGTH, case when A.DATA_PRECISION is null then -1 else  A.DATA_PRECISION end DATA_PRECISION, case when A.DATA_SCALE is null then -1 else  A.DATA_SCALE end DATA_SCALE,  case when A.NULLABLE ='Y' THEN 'True' ELSE 'False' END as isnull, B.COMMENTS,A.DATA_DEFAULT,case when a.AVG_COL_LEN is null then -1 else a.AVG_COL_LEN end AVG_COL_LEN
+            FROM USER_TAB_COLUMNS A LEFT JOIN USER_COL_COMMENTS B 
+            ON A.TABLE_NAME=B.TABLE_NAME AND A.COLUMN_NAME=B.COLUMN_NAME 
+            WHERE A.TABLE_NAME='%s' ORDER BY COLUMN_ID ASC""" % table_name)
+    result = []
+    primary_key = table_primary(table_name)
+    for column in cur_tbl_columns:  # 按照游标行遍历字段
+        '''
+        result.append({'column_name': column[0],
+                       'type': column[1],
+                       'primary': column[0] in primary_key,
+                       'length': column[2],
+                       'precision': column[3],
+                       'scale': column[4],
+                       'nullable': column[5],
+                       'comment': column[6]})
+        '''
+        # 字符类型转换为MySQL的varchar
+        if column[1] == 'VARCHAR2' or column[1] == 'CHAR' or column[1] == 'NCHAR' or column[1] == 'NVARCHAR2':
+            result.append({'fieldname': column[0],  # 如下为字段的属性值
+                           'type': 'VARCHAR' + '(' + str(column[2]) + ')',  # 列字段类型以及长度范围
+                           'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                           'default': column[7],  # 字段默认值
+                           'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                           }
+                          )
+        # 判断number类型是否是浮点，是否是整数，转为MySQL的int或者decimal。下面分了3种情况区分整数与浮点
+        # column[n] == -1,代表该值为null，方便通过比较大小判断是否为空
+        elif column[1] == 'NUMBER':
+            if column[3] > 0 and column[4] > 0:  # 浮点类型判断，如number(5,2)映射为MySQL的DECIMAL(5,2)
+                result.append({'fieldname': column[0],
+                               'type': 'DECIMAL' + '(' + str(column[3]) + ',' + str(column[4]) + ')',  # 列字段类型以及长度范围
+                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'default': column[7],  # 字段默认值
+                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               }
+                              )
+            elif column[3] > 0 and column[4] == 0 and column[8] >= 7:  # 整数类型判断，如number(38,0)，映射为MySQL的bigint
+                result.append({'fieldname': column[0],
+                               'type': 'BIGINT',  # 列字段类型以及长度范围
+                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'default': column[7],  # 字段默认值
+                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               }
+                              )
+            elif column[3] > 0 and column[4] == 0 and column[8] < 7:  # 整数类型判断，如number(10,0)，映射为MySQL的int
+                result.append({'fieldname': column[0],
+                               'type': 'INT',  # 列字段类型以及长度范围
+                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'default': column[7],  # 字段默认值
+                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               }
+                              )
+            elif column[3] == -1 and column[4] == -1 and column[8] >= 7:  # 整数类型判断，如id number,若数值较大，AVG_COL_LEN>=7，映射为MySQL的bigint
+                result.append({'fieldname': column[0],
+                               'type': 'BIGINT',  # 列字段类型以及长度范围
+                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'default': column[7],  # 字段默认值
+                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               }
+                              )
+            elif column[3] == -1 and column[4] == -1 and column[8] < 7:  # 整数类型判断，如id number,若数值较小，AVG_COL_LEN<7，映射为MySQL的int
+                result.append({'fieldname': column[0],
+                               'type': 'INT',  # 列字段类型以及长度范围
+                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'default': column[7],  # 字段默认值
+                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               }
+                              )
+        else:
+            result.append({'fieldname': column[0],  # 如果是非大字段类型，通过括号加上字段类型长度范围
+                           'type': column[1] + '(' + str(column[2]) + ')',  # 列字段类型以及长度范围
+                           'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                           'default': column[7],  # 字段默认值
+                           'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                           }
 
-if source_db_type.upper() == 'ORACLE':
-    get_column_length = 'select count(*) from user_tab_columns where table_name= ' + "'" + source_table.upper() + "'"  # 拼接获取源表有多少个列的SQL
-elif source_db_type.upper() == 'MYSQL':
-    get_column_length = 'select * from ' + source_table + ' limit 1'  # 拼接获取源表有多少个列的SQL
-cur_select.execute(get_column_length)  # 执行
-col_len = cur_select.fetchone()  # 获取源表有多少个列
-col_len = col_len[0]
-val_str = ''
-if target_db_type.upper() == 'MYSQL':
-    for i in range(1, col_len):
-        val_str = val_str + '%s' + ','
-    val_str = val_str + '%s'  # MySQL批量插入语法是 insert into tb_name values(%s,%s,%s,%s)
-elif target_db_type.upper() == 'ORACLE':
-    for i in range(1, col_len):
-        val_str = val_str + ':' + str(i) + ','
-    val_str = val_str + ':' + str(col_len)  # Oracle批量插入语法是 insert into tb_name values(:1,:2,:3)
-insert_sql = 'insert into ' + target_table + ' values(' + val_str + ')'  # 拼接insert into 目标表 values  #目标表插入语句
-select_sql = 'select * from ' + source_table  # 源查询SQL，如果有where过滤条件，在这里拼接
-cur_select.execute(select_sql)  # 执行
-print('开始执行:', time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
-while True:
-    rows = list(
-        cur_select.fetchmany(2000))  # 每次获取500行，由cur_select.arraysize值决定，MySQL fetchmany 返回的是 tuple 数据类型 所以用list做类型转换
-    cur_insert.executemany(insert_sql, rows)  # 批量插入每次500行，需要注意的是 rows 必须是 list [] 数据类型
-    target_db.commit()  # 提交
-    if not rows:
-        break  # 中断循环
-cur_select.close()
-cur_insert.close()
-source_db.close()
-target_db.close()
-print('执行成功:', time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+                          )
+    # print(result)
+    cur_tbl_columns.close()
+    return result
+
+
+# 生成创建目标表的拼接sql
+def create_table(new_tbl, meta_tbl):  # new_tbl：即将创建的新表, meta_tbl：源表的表名
+    cur_createtbl = target_db.cursor()
+    fieldinfos = []
+    structs = tbl_columns(meta_tbl)  # 获取源表的表字段信息
+    v_pri_key = table_primary(meta_tbl)  # 获取源表的主键字段
+    for struct in structs:
+        defaultvalue = struct.get('default')
+        if defaultvalue:
+            defaultvalue = "'{0}'".format(defaultvalue) if type(defaultvalue) == 'str' else str(defaultvalue)
+        fieldinfos.append('{0} {1} {2} {3}'.format(struct['fieldname'],
+                                                   struct['type'],
+                                                   # 'primary key' if struct.get('primary') else '',主键在创建表的时候定义
+                                                   (
+                                                           'default ' + '\'' + defaultvalue + '\'') if defaultvalue else '',
+                                                   '' if struct.get('isnull') else 'not null'))
+    create_table_sql = 'create table {0} ({1})'.format(new_tbl, ','.join(fieldinfos))  # 生成创建目标表的sql
+    add_pri_key_sql = 'alter table {0} add primary key ({1})'.format(new_tbl, ','.join(v_pri_key))  # 创建目标表之后增加主键
+    cur_createtbl.execute(create_table_sql)
+    if v_pri_key:
+        cur_createtbl.execute(add_pri_key_sql)
+
+
+new_tablename = 'TEST_PJ'
+meta_tablename = 'TEST4'
+# v_table_primary = table_primary(tablename)
+# v_columns = tbl_columns(meta_tablename)
+# print(v_table_primary)
+# print(v_columns)
+create_table(new_tablename, meta_tablename)

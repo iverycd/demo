@@ -11,10 +11,10 @@ import datetime
 import sys
 
 os.environ['NLS_LANG'] = 'SIMPLIFIED CHINESE_CHINA.UTF8'  # 设置字符集为UTF8，防止中文乱码
-source_db = pymysql.connect("192.168.189.208", "root", "Gepoint", "cnsbzb_v8_test")  # 源库
-target_db = cx_Oracle.connect('cnsbzb_v8_test/11111@192.168.189.208:1522/orcl11g')  # 目标库
+source_db = pymysql.connect("192.168.189.208", "root", "Gepoint", "emall_zhongchao")  # 源库
+target_db = cx_Oracle.connect('emall_zhongchao/11111@192.168.189.208:1522/orcl11g')  # 目标库
 source_db_type = 'MySQL'  # 大小写无关，后面会被转为大写
-source_database = 'cnsbzb_v8_test'  # MySQL中要迁移的数据库名称，用于查询information_schema表名称以及字段数量
+source_database = 'emall_zhongchao'  # MySQL中要迁移的数据库名称，用于查询information_schema表名称以及字段数量
 target_db_type = 'Oracle'  # 大小写无关，后面会被转为大写
 
 cur_select = source_db.cursor()  # 源库查询对象
@@ -29,7 +29,7 @@ cur_insert.arraysize = 5000
 # 将要迁移的表输出到文本文件
 def print_table():
     cur_tblprt = source_db.cursor()  # 生成用于输出表名的游标对象
-    tableoutput_sql = 'select table_name from information_schema.tables where table_schema=' + "'" + source_database + "'" + 'and TABLE_TYPE=\'BASE TABLE\'' + ' and table_name=\'frame_ou\''  # 查询需要导出的表  + ' and table_name=\'test\''
+    tableoutput_sql = 'select table_name from information_schema.tables where table_schema=' + "'" + source_database + "'" + 'and TABLE_TYPE=\'BASE TABLE\' '  # 查询需要导出的表  + ' and table_name=\'test\''
     cur_tblprt.execute(tableoutput_sql)  # 执行
     filename = '/tmp/table_name.csv'
     f = open(filename, 'w')

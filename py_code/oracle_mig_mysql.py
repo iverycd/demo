@@ -2,9 +2,14 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.3.2
+# V1.3.2.1
 """
 MODIFY HISTORY
+****************************************************
+v1.3.2.1
+2020.10.26
+1、增加ddl创建log
+2、待修正number类型默认值创建失败问题
 ****************************************************
 v1.3.2
 2020.10.23
@@ -47,6 +52,7 @@ import sys
 import traceback
 import decimal
 import re
+import logging
 
 
 # 记录执行日志
@@ -93,6 +99,8 @@ def dataconvert(cursor, name, defaultType, size, precision, scale):
 
 
 cur_oracle_result.outputtypehandler = dataconvert
+# 用于记录ddl创建失败的表名
+ddl_failed_table_result = []
 
 
 # source_table = input("请输入源表名称:")    # 手动从键盘获取源表名称
@@ -137,14 +145,25 @@ def tbl_columns(table_name):
         # 对游标cur_tbl_columns中每行的column[1]字段进行平行判断
         # 字符类型映射规则，字符串类型映射为MySQL类型varchar(n)
         if column[1] == 'VARCHAR2' or column[1] == 'CHAR' or column[1] == 'NCHAR' or column[1] == 'NVARCHAR2':
-            if column[2] >= 2000:
-                result.append({'fieldname': column[0],  # 如下为字段的属性值
-                               'type': 'TINYTEXT',  # 列字段类型以及长度范围
-                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
-                               'default': column[7],  # 字段默认值
-                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
-                               }
-                              )
+            #  如果varchar大于等于1000映射为MySQL的tinytext
+            if column[2] >= 1000:
+                #  如果tinytext中有默认值( '' )，去掉括号直接对应MySQL的null
+                if column[7] == '( \'\' )':
+                    result.append({'fieldname': column[0],  # 如下为字段的属性值
+                                   'type': 'TINYTEXT',  # 列字段类型以及长度范围
+                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'default': 'null',  # 字段默认值
+                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   }
+                                  )
+                else:
+                    result.append({'fieldname': column[0],  # 如下为字段的属性值
+                                   'type': 'TINYTEXT',  # 列字段类型以及长度范围
+                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'default': column[7],  # 字段默认值
+                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   }
+                                  )
             else:
                 result.append({'fieldname': column[0],  # 如下为字段的属性值
                                'type': 'VARCHAR' + '(' + str(column[2]) + ')',  # 列字段类型以及长度范围
@@ -246,7 +265,7 @@ def tbl_columns(table_name):
 
             # 整数类型判断，如id number,若AVG_COL_LEN比较小，映射为MySQL的int
             elif column[3] == -1 and column[4] == -1 and column[8] < 6:
-                if not column[7]:  # 数据库中number字段类型默认值为null
+                if column[7] == 'NULL\n                 ':  # 数据库中number字段类型默认值为null
                     result.append({'fieldname': column[0],
                                    'type': 'INT',  # 列字段类型以及长度范围
                                    'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
@@ -258,7 +277,7 @@ def tbl_columns(table_name):
                     result.append({'fieldname': column[0],
                                    'type': 'INT',  # 列字段类型以及长度范围
                                    'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
-                                   'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值
+                                   'default': column[7],  # 字段默认值
                                    'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
                                    }
                                   )
@@ -327,13 +346,15 @@ def tbl_columns(table_name):
                            }
 
                           )
-    # print(result)
+    print(result)
     cur_tbl_columns.close()
     return result
 
 
 # 获取在MySQL创建目标表的DDL、增加主键
-def create_table(table_name):  # new_tbl：即将创建的新表, meta_tbl：源表的表名
+def create_table(table_name, write_fail):  # new_tbl：即将创建的新表, meta_tbl：源表的表名
+    #  将创建失败的sql记录到log文件
+    logging.basicConfig(filename='/tmp/ddl_failed_table.log')
     # 在MySQL创建表前先删除存在的表
     drop_target_table = 'drop table if exists ' + table_name
     cur_drop_table.execute(drop_target_table)
@@ -355,9 +376,19 @@ def create_table(table_name):  # new_tbl：即将创建的新表, meta_tbl：源
     create_table_sql = 'create table {0} ({1})'.format(table_name, ','.join(fieldinfos))  # 生成创建目标表的sql
     add_pri_key_sql = 'alter table {0} add primary key ({1})'.format(table_name, ','.join(v_pri_key))  # 创建目标表之后增加主键
     print(create_table_sql)
-    cur_createtbl.execute(create_table_sql)
-    if v_pri_key:
-        cur_createtbl.execute(add_pri_key_sql)
+    try:
+        cur_createtbl.execute(create_table_sql)
+        if v_pri_key:
+            cur_createtbl.execute(add_pri_key_sql)
+    except Exception:
+        print(traceback.format_exc())  # 如果某张表创建失败，遇到异常记录到log，会继续创建下张表
+        if write_fail == 1:
+            print_ddl_failed_table(table_name)
+            ddl_failed_table_result.append(table_name)
+            ddl_create_error_table = traceback.format_exc()
+            logging.error(ddl_create_error_table)
+        else:
+            pass
 
 
 # 仅输出Oracle当前用户的表，即user_tables的table_name
@@ -374,9 +405,17 @@ def print_table():
     f.close()
 
 
-# 仅输出迁移失败的表
-def print_failed_table(table_name):
-    filename = '/tmp/failed_table.csv'
+# 打印输出DDL创建失败的sql语句
+def print_ddl_failed_table(table_name):
+    filename = '/tmp/ddl_failed_table.log'
+    f = open(filename, 'a', encoding='utf-8')
+    f.write(table_name + '\n')
+    f.close()
+
+
+# 打印输出插入失败的表名称
+def print_insert_failed_table(table_name):
+    filename = '/tmp/insert_failed_table.csv'
     f = open(filename, 'a', encoding='utf-8')
     f.write(table_name + '\n')
     f.close()
@@ -417,7 +456,7 @@ def mig_table(tablename, write_fail):
             print(traceback.format_exc())  # 遇到异常记录到log，会继续迁移下张表
             print(tablename, '表记录', rows, '插入失败')
             if write_fail == 1:
-                print_failed_table(tablename)
+                print_insert_failed_table(tablename)
             else:
                 continue
         if not rows:
@@ -437,7 +476,7 @@ def create_meta_table():
             tbl_name = row[0]
             print("\033[31m开始创建表：\033[0m\n")
             print(tbl_name)
-            create_table(tbl_name)
+            create_table(tbl_name, 1)
             print(tbl_name + '表创建完毕', time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), '\n')
     f.close()
 
@@ -469,7 +508,7 @@ def mig_database():
 
 # 仅用于迁移数据插入失败的表
 def mig_failed_table():
-    filename = '/tmp/failed_table.csv'
+    filename = '/tmp/insert_failed_table.csv'
     with open(filename) as f:
         reader = csv.reader(f)
         for row in reader:
@@ -490,7 +529,7 @@ def mig_failed_table():
 
 if __name__ == '__main__':
     starttime = datetime.datetime.now()
-    path = '/tmp/failed_table.csv'  # 迁移失败的表
+    path = '/tmp/ddl_failed_table.log'  # 创建失败的ddl日志文件
     if os.path.exists(path):  # 如果文件存在，每次迁移表前先清除失败的表csv文件
         os.remove(path)  # 删除文件
     print_table()  # 1、生成Oracle要迁移的表写入到csv文件
@@ -499,19 +538,23 @@ if __name__ == '__main__':
     endtime = datetime.datetime.now()
     print("Oracle迁移数据到MySQL完毕,一共耗时" + str((endtime - starttime).seconds) + "秒")
     print('-' * 100)
-    if os.path.exists(path):  # 判断下/tmp/failed_table.csv是否存在，没有就是没有迁移错误
-        print("迁移失败的表如下：")
-        filename = '/tmp/failed_table.csv'  # 输出这次迁移失败的表
+    if ddl_failed_table_result:  # if os.path.exists(path) 判断下/tmp/ddl_failed_table.log是否存在，没有就是没有迁移错误
+        print("DDL创建失败的表如下：")
+        for output_ddl_failed_table_result in ddl_failed_table_result:
+            print(output_ddl_failed_table_result)
+        '''
+        filename = '/tmp/ddl_failed_table.csv'  # 输出这次创建失败的表
         with open(filename, "r") as f:
             data = f.read()  # 读取文件
             print(data)
         f.close()
+        '''
         print('-' * 100)
         print('请检查失败的表DDL以及约束')
         is_continue = input('是否再次迁移失败的表：Y|N\n')
         if is_continue == 'Y' or is_continue == 'y':
             try:
-                print('开始重新迁移失败的表\n')
+                print('开始重新插入失败的表\n')
                 mig_failed_table()
             except Exception as e:
                 print('插入失败')
