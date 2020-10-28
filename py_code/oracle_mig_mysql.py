@@ -2,11 +2,16 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.3.3
+# V1.3.4
 """
 MODIFY HISTORY
 ****************************************************
+v1.3.4
+2020.10.28
+增加创建索引的sql
+****************************************************
 v1.3.3
+2020.10.27
 1、解决number字段类型默认值包含括号的问题
 2、解决字符串类型默认值包含括号的问题
 3、增加输出ddl创建失败的表以及异常捕获语句
@@ -88,6 +93,8 @@ cur_select = source_db.cursor()  # 源库Oracle查询源表有几列
 cur_oracle_result = source_db.cursor()  # 查询Oracle源表的游标结果集
 cur_insert_mysql = target_db.cursor()  # 目标库MySQL插入目标表执行的插入sql
 cur_drop_table = target_db.cursor()  # 在MySQL清除表 drop table if exists
+cur_source_constraint = source_db.cursor()
+cur_target_constraint = target_db.cursor()
 cur_oracle_result.arraysize = 5000  # Oracle数据库游标对象结果集返回的行数即每次获取多少行
 cur_insert_mysql.arraysize = 5000  # MySQL数据库批量插入的行数
 
@@ -107,6 +114,7 @@ def dataconvert(cursor, name, defaultType, size, precision, scale):
 
 
 cur_oracle_result.outputtypehandler = dataconvert
+cur_source_constraint.outputtypehandler = dataconvert
 # 用于记录ddl创建失败的表名
 ddl_failed_table_result = []
 
@@ -433,7 +441,7 @@ def create_table(table_name):  # new_tbl：即将创建的新表, meta_tbl：源
     cur_createtbl = target_db.cursor()
     fieldinfos = []
     structs = tbl_columns(table_name)  # 获取源表的表字段信息
-    v_pri_key = table_primary(table_name)  # 获取源表的主键字段
+    # v_pri_key = table_primary(table_name)  # 获取源表的主键字段，因为已经有创建约束的sql，这里可以不用执行
     # 以下字段已映射为MySQL字段类型
     for struct in structs:
         defaultvalue = struct.get('default')
@@ -446,12 +454,12 @@ def create_table(table_name):  # new_tbl：即将创建的新表, meta_tbl：源
                                                    ('default ' + defaultvalue) if defaultvalue else '',
                                                    '' if struct.get('isnull') else 'not null'))
     create_table_sql = 'create table {0} ({1})'.format(table_name, ','.join(fieldinfos))  # 生成创建目标表的sql
-    add_pri_key_sql = 'alter table {0} add primary key ({1})'.format(table_name, ','.join(v_pri_key))  # 创建目标表之后增加主键
+    # add_pri_key_sql = 'alter table {0} add primary key ({1})'.format(table_name, ','.join(v_pri_key))  # 创建目标表之后增加主键
     print(create_table_sql)
     try:
         cur_createtbl.execute(create_table_sql)
-        if v_pri_key:
-            cur_createtbl.execute(add_pri_key_sql)
+        #  if v_pri_key: 因为已经有创建约束的sql，这里可以不用执行
+        #    cur_createtbl.execute(add_pri_key_sql) 因为已经有创建约束的sql，这里可以不用执行
         print(table_name + '表创建完毕', time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), '\n')
         print_ddl_success_table(table_name)  # ddl创建成功的表，记录下表名到/tmp/ddl_success_table.csv
     except Exception:
@@ -473,6 +481,69 @@ def create_table(table_name):  # new_tbl：即将创建的新表, meta_tbl：源
         print('表' + table_name + '创建失败请检查ddl语句!\n')
 
 
+# 用来创建目标索引的函数
+def user_constraint(table_name):
+    cur_source_constraint.execute("""SELECT
+       (CASE
+         WHEN C.CONSTRAINT_TYPE = 'P' OR C.CONSTRAINT_TYPE = 'R' THEN
+          'ALTER TABLE ' || T.TABLE_NAME || ' ADD CONSTRAINT ' ||
+          T.INDEX_NAME || (CASE
+            WHEN C.CONSTRAINT_TYPE = 'P' THEN
+             ' PRIMARY KEY ('
+            ELSE
+             ' FOREIGN KEY ('
+          END) || WM_CONCAT(T.COLUMN_NAME) || ');'
+         ELSE
+          'CREATE ' || (CASE
+            WHEN I.UNIQUENESS = 'UNIQUE' THEN
+             I.UNIQUENESS || ' '
+            ELSE
+             CASE
+               WHEN I.INDEX_TYPE = 'NORMAL' THEN
+                ''
+               ELSE
+                I.INDEX_TYPE || ' '
+             END
+          END) || 'INDEX ' || T.INDEX_NAME || ' ON ' || T.TABLE_NAME || '(' ||
+          WM_CONCAT(COLUMN_NAME) || ');'
+       END) SQL_CMD
+  FROM USER_IND_COLUMNS T, USER_INDEXES I, USER_CONSTRAINTS C
+ WHERE T.INDEX_NAME = I.INDEX_NAME
+   AND T.INDEX_NAME = C.CONSTRAINT_NAME(+)
+   and T.TABLE_NAME = '%s'
+ GROUP BY T.TABLE_NAME,
+          T.INDEX_NAME,
+          I.UNIQUENESS,
+          I.INDEX_TYPE,
+          C.CONSTRAINT_TYPE""" % table_name)  # T.TABLE_NAME = '%s',%s传进去是没有单引号，所以需要用单引号号包围
+    for d in cur_source_constraint:
+        create_index_sql = d[0]
+        print(create_index_sql)
+        try:
+            cur_target_constraint.execute(create_index_sql)
+            print('索引创建完毕\n')
+        except Exception:
+            print('索引创建失败请检查ddl语句!\n')
+            print(traceback.format_exc())
+            constraint_error_table = traceback.format_exc()  # 这里记下索引创建失败的sql在 ddl_failed_table.log
+            logging.error(constraint_error_table)  # ddl创建失败的sql语句输出到文件/tmp/constraint_error_table.log
+
+
+# 调用user_constraint函数批量创建主键以及索引
+def create_meta_constraint():  # new_tbl：即将创建的新表, meta_tbl：源表的表名
+    #  将创建失败的sql记录到log文件
+    # logging.basicConfig(filename='/tmp/constraint_failed_table.log')
+    filename = '/tmp/ddl_success_table.log'  # 读取DDL创建成功的表名
+    with open(filename) as f:
+        reader = csv.reader(f)
+        for row in reader:
+            tbl_name = row[0]
+            print('#' * 50 + '开始创建 ' + tbl_name + ' 的约束以及索引 ' + '#' * 50)
+            # print("\033[31m开始创建表：\033[0m\n")
+            user_constraint(tbl_name)  # 调用user_constraint函数批量创建主键以及索引
+    f.close()
+
+
 # 仅输出Oracle当前用户的表，即user_tables的table_name
 def print_table():
     cur_tblprt = source_db.cursor()  # 生成用于输出表名的游标对象
@@ -491,7 +562,7 @@ def print_table():
 def print_ddl_failed_table(table_name):
     filename = '/tmp/ddl_failed_table.log'
     f = open(filename, 'a', encoding='utf-8')
-    f.write(table_name + '\n')
+    f.write('/' + '*' * 50 + 'TABLE: ' + table_name + '*' * 50 + '/\n')
     f.close()
 
 
@@ -628,7 +699,8 @@ if __name__ == '__main__':
         os.remove(path)  # 删除文件
     print_table()  # 1、读取user_tables,生成Oracle要迁移的表写入到csv文件
     create_meta_table()  # 2、创建表结构
-    mig_database()  # 3、迁移数据
+    create_meta_constraint()  # 3、创建约束
+    mig_database()  # 4、迁移数据
     endtime = datetime.datetime.now()
     print("Oracle迁移数据到MySQL完毕,一共耗时" + str((endtime - starttime).seconds) + "秒")
     print('-' * 100)
