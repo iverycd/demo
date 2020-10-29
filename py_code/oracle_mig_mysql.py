@@ -2,9 +2,15 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.3.4
+# V1.3.5
 """
 MODIFY HISTORY
+****************************************************
+v1.3.5
+2020.10.29
+1、增加外键创建
+2、增加迁移摘要，统计表计数
+3、优化输出格式
 ****************************************************
 v1.3.4
 2020.10.28
@@ -113,14 +119,25 @@ def dataconvert(cursor, name, defaultType, size, precision, scale):
         return cursor.var(decimal.Decimal, arraysize=cursor.arraysize)
 
 
-cur_oracle_result.outputtypehandler = dataconvert
-cur_source_constraint.outputtypehandler = dataconvert
+cur_oracle_result.outputtypehandler = dataconvert  # 查询Oracle表数据结果集的游标
+cur_source_constraint.outputtypehandler = dataconvert  # 查询Oracle主键以及索引、外键的游标
 # 用于记录ddl创建失败的表名
 ddl_failed_table_result = []
+
+# 用于统计主键以及索引创建失败的计数
+constraint_failed_count = []
+
+# 用于统计外键创建失败的计数
+foreignkey_failed_count = []
 
 
 # source_table = input("请输入源表名称:")    # 手动从键盘获取源表名称
 # target_table = input("请输入目标表名称:")  # 手动从键盘获取目标表名称
+
+# 打印连接信息
+def print_connect_info():
+    print('-' * 50 + 'Oracle->MySQL' + '-' * 50)
+    print(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time())))
 
 
 # 获取Oracle的主键字段
@@ -426,13 +443,14 @@ def tbl_columns(table_name):
                            }
 
                           )
+    print('列属性：\n')
     print(result)
     cur_tbl_columns.close()
     return result
 
 
 # 获取在MySQL创建目标表的DDL、增加主键
-def create_table(table_name):  # new_tbl：即将创建的新表, meta_tbl：源表的表名
+def create_table(table_name):
     #  将创建失败的sql记录到log文件
     logging.basicConfig(filename='/tmp/ddl_failed_table.log')
     # 在MySQL创建表前先删除存在的表
@@ -455,13 +473,14 @@ def create_table(table_name):  # new_tbl：即将创建的新表, meta_tbl：源
                                                    '' if struct.get('isnull') else 'not null'))
     create_table_sql = 'create table {0} ({1})'.format(table_name, ','.join(fieldinfos))  # 生成创建目标表的sql
     # add_pri_key_sql = 'alter table {0} add primary key ({1})'.format(table_name, ','.join(v_pri_key))  # 创建目标表之后增加主键
+    print('\nCREATE TABLE SQL:\n')
     print(create_table_sql)
     try:
         cur_createtbl.execute(create_table_sql)
         #  if v_pri_key: 因为已经有创建约束的sql，这里可以不用执行
         #    cur_createtbl.execute(add_pri_key_sql) 因为已经有创建约束的sql，这里可以不用执行
         print(table_name + '表创建完毕', time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), '\n')
-        print_ddl_success_table(table_name)  # ddl创建成功的表，记录下表名到/tmp/ddl_success_table.csv
+        print_ddl_success_table(table_name)  # MySQL ddl创建成功的表，记录下表名到/tmp/ddl_success_table.csv
     except Exception:
         '''
         print(traceback.format_exc())  # 如果某张表创建失败，遇到异常记录到log，会继续创建下张表
@@ -483,6 +502,8 @@ def create_table(table_name):  # new_tbl：即将创建的新表, meta_tbl：源
 
 # 用来创建目标索引的函数
 def user_constraint(table_name):
+    #  将创建失败的sql记录到log文件
+    # logging.basicConfig(filename='/tmp/constraint_error_table.log')
     cur_source_constraint.execute("""SELECT
        (CASE
          WHEN C.CONSTRAINT_TYPE = 'P' OR C.CONSTRAINT_TYPE = 'R' THEN
@@ -521,16 +542,54 @@ def user_constraint(table_name):
         print(create_index_sql)
         try:
             cur_target_constraint.execute(create_index_sql)
-            print('索引创建完毕\n')
+            print('约束以及索引创建完毕\n')
         except Exception:
-            print('索引创建失败请检查ddl语句!\n')
+            constraint_failed_count.append('1')  # 用来统计主键或者索引创建失败的技术，只要创建失败就往list存1
+            print('约束或者索引创建失败请检查ddl语句!\n')
             print(traceback.format_exc())
-            constraint_error_table = traceback.format_exc()  # 这里记下索引创建失败的sql在 ddl_failed_table.log
-            logging.error(constraint_error_table)  # ddl创建失败的sql语句输出到文件/tmp/constraint_error_table.log
+            # constraint_error_table = traceback.format_exc()  # 这里记下索引创建失败的sql在 ddl_failed_table.log
+            # logging.error(constraint_error_table)  # ddl创建失败的sql语句输出到文件/tmp/constraint_error_table.log
+
+
+# 创建外键
+def user_foreign_key(table_name):
+    cur_source_constraint.execute("""SELECT 'ALTER TABLE ' || B.TABLE_NAME || ' ADD CONSTRAINT ' ||
+                B.CONSTRAINT_NAME || ' FOREIGN KEY (' ||
+                (SELECT TO_CHAR(WMSYS.WM_CONCAT(A.COLUMN_NAME))
+                   FROM USER_CONS_COLUMNS A
+                  WHERE A.CONSTRAINT_NAME = B.CONSTRAINT_NAME) || ') REFERENCES ' ||
+                (SELECT B1.table_name FROM USER_CONSTRAINTS B1
+                  WHERE B1.CONSTRAINT_NAME = B.R_CONSTRAINT_NAME) || '(' ||
+                (SELECT TO_CHAR(WMSYS.WM_CONCAT(A.COLUMN_NAME))
+                   FROM USER_CONS_COLUMNS A
+                  WHERE A.CONSTRAINT_NAME = B.R_CONSTRAINT_NAME) || ');'
+           FROM USER_CONSTRAINTS B
+          WHERE B.CONSTRAINT_TYPE = 'R' and TABLE_NAME='%s'""" % table_name)
+    for e in cur_source_constraint:
+        create_foreign_key_sql = e[0]
+        print(create_foreign_key_sql)
+        try:
+            cur_target_constraint.execute(create_foreign_key_sql)
+            print('外键创建完毕\n')
+        except Exception:
+            foreignkey_failed_count.append('1')  # 外键创建失败就往list对象存1
+            print('外键创建失败请检查ddl语句!\n')
+            print(traceback.format_exc())
+
+
+# 调用user_foreign_key函数批量创建外键
+def create_meta_foreignkey():
+    table_foreign_key = 'select table_name from USER_CONSTRAINTS where CONSTRAINT_TYPE= \'R\''
+    cur_source_constraint.execute(table_foreign_key)
+    for v_result_table in cur_source_constraint:
+        table_name = v_result_table[0]
+        print('#' * 50 + '开始创建' + table_name + '外键 ' + '#' * 50)
+        user_foreign_key(table_name)  # 调用user_foreign_key函数批量创建主键以及索引
+    print('\033[31m*' * 50 + '外键创建完成' + '*' * 50 + '\033[0m\n\n\n')
 
 
 # 调用user_constraint函数批量创建主键以及索引
-def create_meta_constraint():  # new_tbl：即将创建的新表, meta_tbl：源表的表名
+def create_meta_constraint():
     #  将创建失败的sql记录到log文件
     # logging.basicConfig(filename='/tmp/constraint_failed_table.log')
     filename = '/tmp/ddl_success_table.log'  # 读取DDL创建成功的表名
@@ -538,9 +597,9 @@ def create_meta_constraint():  # new_tbl：即将创建的新表, meta_tbl：源
         reader = csv.reader(f)
         for row in reader:
             tbl_name = row[0]
-            print('#' * 50 + '开始创建 ' + tbl_name + ' 的约束以及索引 ' + '#' * 50)
-            # print("\033[31m开始创建表：\033[0m\n")
+            print('#' * 50 + '开始创建' + tbl_name + '约束以及索引 ' + '#' * 50)
             user_constraint(tbl_name)  # 调用user_constraint函数批量创建主键以及索引
+        print('\033[31m*' * 50 + '主键约束、索引创建完成' + '*' * 50 + '\033[0m\n\n\n')
     f.close()
 
 
@@ -635,36 +694,28 @@ def create_meta_table():
         reader = csv.reader(f)
         for row in reader:
             tbl_name = row[0]
-            print('#' * 50 + '开始创建表' + '#' * 50)
+            print('#' * 50 + '开始创建表' + tbl_name + '#' * 50)
             # print("\033[31m开始创建表：\033[0m\n")
-            print(tbl_name)
+            print(tbl_name + '\n')
             create_table(tbl_name)  # 调用Oracle映射到MySQL规则的函数
+        print('\033[31m*' * 50 + '表创建完成' + '*' * 50 + '\033[0m\n\n\n')
     f.close()
 
 
 # 从csv文件读取源库需要迁移的表，调用mig_table(tbl_name, 1)，插入表数据，并输出迁移失败的表
 def mig_database():
     filename = '/tmp/ddl_success_table.log'  # 读取要迁移的表，csv文件
+    print('-' * 50 + '开始表数据迁移' + '-' * 50)
     with open(filename) as f:
         reader = csv.reader(f)
         for row in reader:
-            '''
-            try:
-                tbl_name = row[0]
-                print("\033[31m开始迁移：\033[0m" + tbl_name)
-                mig_table(tbl_name)
-                print(tbl_name + '插入完毕', time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
-                # 如果有异常，比如唯一建约束导致插入失败，可以忽略掉继续下一张表
-            except pymysql.err.IntegrityError:
-                pass
-            continue
-            '''
             tbl_name = row[0]
-            print('-' * 50 + '开始表数据迁移' + '-' * 50)
+            print('-' * 50 + tbl_name + '正在迁移数据' + '-' * 50)
             # print("\033[31m开始表数据迁移：\033[0m\n")
             print(tbl_name)
             mig_table(tbl_name, 1)
-            print(tbl_name + '插入完毕', time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), '\n')
+            print(tbl_name + '数据插入完毕', time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), '\n')
+        print('\033[31m*' * 50 + '表数据迁移完成' + '*' * 50 + '\033[0m\n\n\n')
     f.close()
 
 
@@ -689,7 +740,57 @@ def mig_failed_table():
     f.close()
 
 
+# 迁移摘要
+def mig_summary():
+    # Oracle源表信息
+    cur_select.execute("""select user from dual""")
+    oracle_schema = cur_select.fetchone()[0]
+    cur_select.execute("""select count(*) from user_tables""")
+    oracle_tab_count = cur_select.fetchone()[0]
+    cur_select.execute("""select sum(row_count) from (
+                               SELECT 1 row_count
+                               FROM USER_IND_COLUMNS T,
+                                    USER_INDEXES I,
+                                    USER_CONSTRAINTS C
+                               WHERE T.INDEX_NAME = I.INDEX_NAME
+                                 AND T.INDEX_NAME = C.CONSTRAINT_NAME(+)
+                               GROUP BY T.TABLE_NAME,
+                                        T.INDEX_NAME,
+                                        I.UNIQUENESS,
+                                        I.INDEX_TYPE,
+                                        C.CONSTRAINT_TYPE
+                           )""")
+    oracle_constraint_count = cur_select.fetchone()[0]
+    cur_select.execute("""select count(*) from USER_CONSTRAINTS where CONSTRAINT_TYPE='R'""")
+    oracle_fk_count = cur_select.fetchone()[0]
+    # Oracle源表信息
+
+    # MySQL迁移计数
+    cur_insert_mysql.execute("""select database()""")
+    mysql_database_name = cur_insert_mysql.fetchone()[0]
+    mysql_table_count = 0
+    filepath = '/tmp/ddl_success_table.log'
+    for index, line in enumerate(open(filepath, 'r')):
+        mysql_table_count += 1
+    table_failed_count = len(ddl_failed_table_result)
+    index_failed_count = len(constraint_failed_count)
+    fk_failed_count = len(foreignkey_failed_count)
+    # MySQL迁移计数
+    print('\033[31m*' * 50 + '数据迁移摘要' + '*' * 50 + '\033[0m\n\n\n')
+    print('源数据库模式名: ' + oracle_schema)
+    print('源表数量计数: ' + str(oracle_tab_count))
+    print('源表约束以及索引数量计数: ' + str(oracle_constraint_count))
+    print('源表外键数量计数: ' + str(oracle_fk_count))
+    print('\n\n\n')
+    print('目标数据库: ' + mysql_database_name)
+    print('表成功创建计数: ' + str(mysql_table_count))
+    print('表创建失败计数: ' + str(table_failed_count))
+    print('表索引以及约束创建失败计数: ' + str(index_failed_count))
+    print('外键创建失败计数: ' + str(fk_failed_count))
+
+
 if __name__ == '__main__':
+    print_connect_info()
     starttime = datetime.datetime.now()
     patha = '/tmp/ddl_success_table.log'  # 用来记录DDL创建成功的表
     if os.path.exists(patha):  # 在每次创建表前清空文件
@@ -700,7 +801,8 @@ if __name__ == '__main__':
     print_table()  # 1、读取user_tables,生成Oracle要迁移的表写入到csv文件
     create_meta_table()  # 2、创建表结构
     create_meta_constraint()  # 3、创建约束
-    mig_database()  # 4、迁移数据
+    create_meta_foreignkey()  # 4、创建外键
+    mig_database()  # 5、迁移数据 (只迁移DDL创建成功的表)
     endtime = datetime.datetime.now()
     print("Oracle迁移数据到MySQL完毕,一共耗时" + str((endtime - starttime).seconds) + "秒")
     print('-' * 100)
@@ -708,16 +810,10 @@ if __name__ == '__main__':
         print("DDL创建失败的表如下：")
         for output_ddl_failed_table_result in ddl_failed_table_result:
             print(output_ddl_failed_table_result)
-        '''
-        filename = '/tmp/ddl_failed_table.csv'  # 输出这次创建失败的表
-        with open(filename, "r") as f:
-            data = f.read()  # 读取文件
-            print(data)
-        f.close()
-        '''
         print('-' * 100)
-        print('请检查失败的表DDL以及约束')
-        is_continue = input('是否再次迁移失败的表：Y|N\n')
+        '''
+        # 再次对失败的表迁移数据
+                is_continue = input('是否再次迁移失败的表：Y|N\n')
         if is_continue == 'Y' or is_continue == 'y':
             try:
                 print('开始重新插入失败的表\n')
@@ -728,7 +824,11 @@ if __name__ == '__main__':
             print('迁移完毕！')
     else:
         print('迁移成功，没有迁移失败的表')
+        '''
 
+    mig_summary()
+    print('\n请检查创建失败的表DDL以及约束。有关更多详细信息，请参阅迁移输出信息')
+    print('迁移日志已保存到"/tmp/mig.log"')
 cur_select.close()
 cur_insert_mysql.close()
 source_db.close()
