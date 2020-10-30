@@ -2,9 +2,15 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.3.5
+# V1.3.6
 """
 MODIFY HISTORY
+****************************************************
+V1.3.6
+2020.10.30
+1、增加创建自增列的sql
+2、增加源数据库连接信息、表、视图、触发器等信息
+3、下个版本需要创建存Oracle触发器定义以及表字段的表
 ****************************************************
 v1.3.5
 2020.10.29
@@ -90,11 +96,13 @@ class Logger(object):
 
 sys.stdout = Logger(stream=sys.stdout)
 os.environ['NLS_LANG'] = 'SIMPLIFIED CHINESE_CHINA.UTF8'  # 设置字符集为UTF8，防止中文乱码
-source_db = cx_Oracle.connect('TEST2/oracle@192.168.189.208:1522/orcl11g')  # 源库Oracle的数据库连接
-target_db = pymysql.connect("192.168.189.208", "root", "Gepoint", "test2")  # 目标库MySQL的数据库连接
+ora_conn = 'TEST2/oracle@192.168.189.208:1522/orcl11g'
+mysql_conn = '192.168.189.208'
+mysql_target_db = 'test2'
+source_db = cx_Oracle.connect(ora_conn)  # 源库Oracle的数据库连接
+target_db = pymysql.connect(mysql_conn, "root", "Gepoint", mysql_target_db)  # 目标库MySQL的数据库连接
 source_db_type = 'Oracle'  # 大小写无关，后面会被转为大写
 target_db_type = 'MySQL'  # 大小写无关，后面会被转为大写
-
 cur_select = source_db.cursor()  # 源库Oracle查询源表有几列
 cur_oracle_result = source_db.cursor()  # 查询Oracle源表的游标结果集
 cur_insert_mysql = target_db.cursor()  # 目标库MySQL插入目标表执行的插入sql
@@ -135,9 +143,32 @@ foreignkey_failed_count = []
 # target_table = input("请输入目标表名称:")  # 手动从键盘获取目标表名称
 
 # 打印连接信息
-def print_connect_info():
+def print_source_info():
     print('-' * 50 + 'Oracle->MySQL' + '-' * 50)
     print(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time())))
+    print('源Oracle数据库连接信息: ' + ora_conn)
+    cur_select.execute("""select count(*) from user_tables""")
+    source_table_count = cur_select.fetchone()[0]
+    cur_select.execute("""select count(*) from user_views""")
+    source_view_count = cur_select.fetchone()[0]
+    cur_select.execute("""select count(*) from user_triggers where TRIGGER_NAME not like 'BIN$rse+%'""")
+    source_trigger_count = cur_select.fetchone()[0]
+    cur_select.execute("""
+    select count(*) from USER_PROCEDURES where OBJECT_TYPE='PROCEDURE' and OBJECT_NAME  not like 'BIN$rse+%'""")
+    source_procedure_count = cur_select.fetchone()[0]
+    cur_select.execute(
+        """select count(*) from USER_PROCEDURES where OBJECT_TYPE='FUNCTION' and OBJECT_NAME  not like 'BIN$rse+%'""")
+    source_function_count = cur_select.fetchone()[0]
+    cur_select.execute(
+        """select count(*) from USER_PROCEDURES where OBJECT_TYPE='PACKAGE' and OBJECT_NAME  not like 'BIN$rse+%'""")
+    source_package_count = cur_select.fetchone()[0]
+    print('源表总计: ' + str(source_table_count))
+    print('源视图总计: ' + str(source_view_count))
+    print('源触发器总计: ' + str(source_trigger_count))
+    print('源存储过程总计: ' + str(source_procedure_count))
+    print('源数据库函数总计: ' + str(source_function_count))
+    print('源数据库包总计: ' + str(source_package_count))
+    print('目标MySQL数据库连接信息: ' + 'ip-> ' + mysql_conn + ' database-> ' + mysql_target_db)
 
 
 # 获取Oracle的主键字段
@@ -603,6 +634,36 @@ def create_meta_constraint():
     f.close()
 
 
+# 查找具有自增特性的表以及字段名称
+def auto_increament_col():
+    print('#' * 50 + '开始创建自增列的索引'  + '#' * 50)
+    cur_oracle_result.execute("""
+    select 'create  index ids_'||substr(table_name,1,26)||' on '||table_name||'('||upper(substr(substr(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.')), 1, instr(upper(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.'))), ' FROM DUAL;') - 1), 5)) ||');' as sql_create from trigger_name where instr(upper(trigger_body), 'NEXTVAL')>0
+    """)  # 在Oracle拼接生成用于在MySQL中自增列的索引
+    try:
+        for v_increa_index in cur_oracle_result:
+            create_autoincrea_index = v_increa_index[0]
+            print(create_autoincrea_index)
+            cur_insert_mysql.execute(create_autoincrea_index)
+    except Exception:
+        print('用于自增列的索引创建失败，请检查源触发器！\n')
+        print(traceback.format_exc())
+    print('开始修改自增列属性：')
+    cur_oracle_result.execute("""
+    select 'alter table '||table_name||' modify '||upper(substr(substr(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.')), 1, instr(upper(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.'))), ' FROM DUAL;') - 1), 5)) ||' int auto_increment;' from trigger_name where instr(upper(trigger_body), 'NEXTVAL')>0
+    """)
+    for v_increa_col in cur_oracle_result:
+        alter_increa_col = v_increa_col[0]
+        print('\n执行sql alter table：\n')
+        print(alter_increa_col)
+        try:  # 注意下try要在for里面
+            cur_insert_mysql.execute(alter_increa_col)
+        except Exception:  # 如果有异常打印异常信息，并跳过继续下个自增列修改
+            print('修改自增列失败，请检查源触发器！\n')
+            print(traceback.format_exc())
+    print('\033[31m*' * 50 + '自增列修改完成' + '*' * 50 + '\033[0m\n\n\n')
+
+
 # 仅输出Oracle当前用户的表，即user_tables的table_name
 def print_table():
     cur_tblprt = source_db.cursor()  # 生成用于输出表名的游标对象
@@ -790,7 +851,7 @@ def mig_summary():
 
 
 if __name__ == '__main__':
-    print_connect_info()
+    print_source_info()
     starttime = datetime.datetime.now()
     patha = '/tmp/ddl_success_table.log'  # 用来记录DDL创建成功的表
     if os.path.exists(patha):  # 在每次创建表前清空文件
@@ -803,6 +864,7 @@ if __name__ == '__main__':
     create_meta_constraint()  # 3、创建约束
     create_meta_foreignkey()  # 4、创建外键
     mig_database()  # 5、迁移数据 (只迁移DDL创建成功的表)
+    auto_increament_col()
     endtime = datetime.datetime.now()
     print("Oracle迁移数据到MySQL完毕,一共耗时" + str((endtime - starttime).seconds) + "秒")
     print('-' * 100)
