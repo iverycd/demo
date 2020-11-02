@@ -2,9 +2,14 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.3.6
+# V1.3.6.1
 """
 MODIFY HISTORY
+****************************************************
+V1.3.6.1
+2020.11.2
+1、由于Oracle的long类型无法使用字符串截取，增加临时表trigger_name用于存储Oracle触发器信息
+2、优化输出方式
 ****************************************************
 V1.3.6
 2020.10.30
@@ -636,10 +641,31 @@ def create_meta_constraint():
 
 # 查找具有自增特性的表以及字段名称
 def auto_increament_col():
-    print('#' * 50 + '开始创建自增列的索引'  + '#' * 50)
+    print('#' * 50 + '开始增加自增列' + '#' * 50)
+    # Oracle中无法对long类型数据截取，创建用于存储触发器字段信息的临时表TRIGGER_NAME
+    cur_oracle_result.execute("""
+    select count(*) from user_tables where table_name='TRIGGER_NAME'
+    """)
+    count_num_tri = cur_oracle_result.fetchone()[0]
+    if count_num_tri:
+        cur_oracle_result.execute("""
+            truncate table trigger_name
+            """)
+        cur_oracle_result.execute("""
+                insert into trigger_name select table_name ,to_lob(trigger_body) from user_triggers
+                """)
+    else:
+        cur_oracle_result.execute("""
+                    create table trigger_name (table_name varchar2(200),trigger_body clob)
+                    """)
+        cur_oracle_result.execute("""
+        insert into trigger_name select table_name ,to_lob(trigger_body) from user_triggers
+        """)
+
     cur_oracle_result.execute("""
     select 'create  index ids_'||substr(table_name,1,26)||' on '||table_name||'('||upper(substr(substr(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.')), 1, instr(upper(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.'))), ' FROM DUAL;') - 1), 5)) ||');' as sql_create from trigger_name where instr(upper(trigger_body), 'NEXTVAL')>0
     """)  # 在Oracle拼接生成用于在MySQL中自增列的索引
+    print('创建用于自增列的索引:\n ')
     try:
         for v_increa_index in cur_oracle_result:
             create_autoincrea_index = v_increa_index[0]
@@ -662,6 +688,9 @@ def auto_increament_col():
             print('修改自增列失败，请检查源触发器！\n')
             print(traceback.format_exc())
     print('\033[31m*' * 50 + '自增列修改完成' + '*' * 50 + '\033[0m\n\n\n')
+    cur_oracle_result.execute("""
+    drop table trigger_name purge
+    """)
 
 
 # 仅输出Oracle当前用户的表，即user_tables的table_name
