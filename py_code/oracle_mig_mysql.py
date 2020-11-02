@@ -2,9 +2,15 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.3.6.1
+# V1.3.6.2
 """
 MODIFY HISTORY
+****************************************************
+V1.3.6.2
+2020.11.2
+1、优化索引创建方式
+2、不再对大于1000长度的字符串类型映射为tinytext
+3、修复调用批量创建自增列索引，无法跳过异常的问题
 ****************************************************
 V1.3.6.1
 2020.11.2
@@ -101,7 +107,7 @@ class Logger(object):
 
 sys.stdout = Logger(stream=sys.stdout)
 os.environ['NLS_LANG'] = 'SIMPLIFIED CHINESE_CHINA.UTF8'  # 设置字符集为UTF8，防止中文乱码
-ora_conn = 'TEST2/oracle@192.168.189.208:1522/orcl11g'
+ora_conn = 'NJJBXQ_DJGBZ/11111@192.168.189.208:1522/orcl11g'
 mysql_conn = '192.168.189.208'
 mysql_target_db = 'test2'
 source_db = cx_Oracle.connect(ora_conn)  # 源库Oracle的数据库连接
@@ -156,16 +162,16 @@ def print_source_info():
     source_table_count = cur_select.fetchone()[0]
     cur_select.execute("""select count(*) from user_views""")
     source_view_count = cur_select.fetchone()[0]
-    cur_select.execute("""select count(*) from user_triggers where TRIGGER_NAME not like 'BIN$rse+%'""")
+    cur_select.execute("""select count(*) from user_triggers where TRIGGER_NAME not like 'BIN$%'""")
     source_trigger_count = cur_select.fetchone()[0]
     cur_select.execute("""
-    select count(*) from USER_PROCEDURES where OBJECT_TYPE='PROCEDURE' and OBJECT_NAME  not like 'BIN$rse+%'""")
+    select count(*) from USER_PROCEDURES where OBJECT_TYPE='PROCEDURE' and OBJECT_NAME  not like 'BIN$%'""")
     source_procedure_count = cur_select.fetchone()[0]
     cur_select.execute(
-        """select count(*) from USER_PROCEDURES where OBJECT_TYPE='FUNCTION' and OBJECT_NAME  not like 'BIN$rse+%'""")
+        """select count(*) from USER_PROCEDURES where OBJECT_TYPE='FUNCTION' and OBJECT_NAME  not like 'BIN$%'""")
     source_function_count = cur_select.fetchone()[0]
     cur_select.execute(
-        """select count(*) from USER_PROCEDURES where OBJECT_TYPE='PACKAGE' and OBJECT_NAME  not like 'BIN$rse+%'""")
+        """select count(*) from USER_PROCEDURES where OBJECT_TYPE='PACKAGE' and OBJECT_NAME  not like 'BIN$%'""")
     source_package_count = cur_select.fetchone()[0]
     print('源表总计: ' + str(source_table_count))
     print('源视图总计: ' + str(source_view_count))
@@ -216,7 +222,7 @@ def tbl_columns(table_name):
         if column[1] == 'VARCHAR2' or column[1] == 'CHAR' or column[1] == 'NCHAR' or column[1] == 'NVARCHAR2':
             #  由于MySQL创建表的时候除了大字段，所有列长度不能大于64k，为了转换方便，如果Oracle字符串长度大于等于1000映射为MySQL的tinytext
             #  由于MySQL大字段不能有默认值，所以这里的默认值都统一为null
-            if column[2] >= 1000:
+            if column[2] >= 10000:
                 result.append({'fieldname': column[0],  # 如下为字段的属性值
                                'type': 'TINYTEXT',  # 列字段类型以及长度范围
                                'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
@@ -537,7 +543,7 @@ def create_table(table_name):
 
 
 # 用来创建目标索引的函数
-def user_constraint(table_name):
+def user_constraint():
     #  将创建失败的sql记录到log文件
     # logging.basicConfig(filename='/tmp/constraint_error_table.log')
     cur_source_constraint.execute("""SELECT
@@ -567,12 +573,11 @@ def user_constraint(table_name):
   FROM USER_IND_COLUMNS T, USER_INDEXES I, USER_CONSTRAINTS C
  WHERE T.INDEX_NAME = I.INDEX_NAME
    AND T.INDEX_NAME = C.CONSTRAINT_NAME(+)
-   and T.TABLE_NAME = '%s'
  GROUP BY T.TABLE_NAME,
           T.INDEX_NAME,
           I.UNIQUENESS,
           I.INDEX_TYPE,
-          C.CONSTRAINT_TYPE""" % table_name)  # T.TABLE_NAME = '%s',%s传进去是没有单引号，所以需要用单引号号包围
+          C.CONSTRAINT_TYPE""")  # 如果要每张表查使用T.TABLE_NAME = '%s',%s传进去是没有单引号，所以需要用单引号号包围
     for d in cur_source_constraint:
         create_index_sql = d[0]
         print(create_index_sql)
@@ -628,15 +633,21 @@ def create_meta_foreignkey():
 def create_meta_constraint():
     #  将创建失败的sql记录到log文件
     # logging.basicConfig(filename='/tmp/constraint_failed_table.log')
-    filename = '/tmp/ddl_success_table.log'  # 读取DDL创建成功的表名
+    """
+    之前是调用user_constraint函数按每张表批量创建主键以及索引，现在改为了一次性创建约束以及索引
+     filename = '/tmp/ddl_success_table.log'  # 读取DDL创建成功的表名
     with open(filename) as f:
         reader = csv.reader(f)
         for row in reader:
             tbl_name = row[0]
             print('#' * 50 + '开始创建' + tbl_name + '约束以及索引 ' + '#' * 50)
-            user_constraint(tbl_name)  # 调用user_constraint函数批量创建主键以及索引
+            user_constraint()  # 之前是调用user_constraint函数按每张表批量创建主键以及索引，现在改为了一次性创建约束以及索引
         print('\033[31m*' * 50 + '主键约束、索引创建完成' + '*' * 50 + '\033[0m\n\n\n')
     f.close()
+    """
+    print('#' * 50 + '开始创建' + '约束以及索引 ' + '#' * 50)
+    user_constraint()  # 现在改为了一次性创建约束以及索引
+    print('\033[31m*' * 50 + '主键约束、索引创建完成' + '*' * 50 + '\033[0m\n\n\n')
 
 
 # 查找具有自增特性的表以及字段名称
@@ -666,14 +677,15 @@ def auto_increament_col():
     select 'create  index ids_'||substr(table_name,1,26)||' on '||table_name||'('||upper(substr(substr(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.')), 1, instr(upper(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.'))), ' FROM DUAL;') - 1), 5)) ||');' as sql_create from trigger_name where instr(upper(trigger_body), 'NEXTVAL')>0
     """)  # 在Oracle拼接生成用于在MySQL中自增列的索引
     print('创建用于自增列的索引:\n ')
-    try:
-        for v_increa_index in cur_oracle_result:
-            create_autoincrea_index = v_increa_index[0]
-            print(create_autoincrea_index)
+    for v_increa_index in cur_oracle_result:
+        create_autoincrea_index = v_increa_index[0]
+        print(create_autoincrea_index)
+        try:
             cur_insert_mysql.execute(create_autoincrea_index)
-    except Exception:
-        print('用于自增列的索引创建失败，请检查源触发器！\n')
-        print(traceback.format_exc())
+        except Exception:
+            print('用于自增列的索引创建失败，请检查源触发器！\n')
+            print(traceback.format_exc())
+
     print('开始修改自增列属性：')
     cur_oracle_result.execute("""
     select 'alter table '||table_name||' modify '||upper(substr(substr(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.')), 1, instr(upper(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.'))), ' FROM DUAL;') - 1), 5)) ||' int auto_increment;' from trigger_name where instr(upper(trigger_body), 'NEXTVAL')>0
@@ -764,7 +776,7 @@ def mig_table(tablename, write_fail):
             target_db.commit()  # 提交
         except Exception as e:
             print(traceback.format_exc())  # 遇到异常记录到log，会继续迁移下张表
-            print(tablename, '表记录', rows, '插入失败')
+            #  print(tablename, '表记录', rows, '插入失败') 插入失败时输出insert语句
             if write_fail == 1:
                 print_insert_failed_table(tablename)
             else:
@@ -893,7 +905,7 @@ if __name__ == '__main__':
     create_meta_constraint()  # 3、创建约束
     create_meta_foreignkey()  # 4、创建外键
     mig_database()  # 5、迁移数据 (只迁移DDL创建成功的表)
-    auto_increament_col()
+    auto_increament_col()  # 6、增加自增列
     endtime = datetime.datetime.now()
     print("Oracle迁移数据到MySQL完毕,一共耗时" + str((endtime - starttime).seconds) + "秒")
     print('-' * 100)
