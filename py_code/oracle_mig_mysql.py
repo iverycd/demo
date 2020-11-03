@@ -2,9 +2,14 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.3.6.3
+# V1.3.7
 """
 MODIFY HISTORY
+****************************************************
+V1.3.7
+2020.11.3
+1、增加ddl创建comment列字段注释
+2、增加Oracle视图创建到MySQL
 ****************************************************
 V1.3.6.3
 2020.11.3 11:20
@@ -153,6 +158,9 @@ constraint_failed_count = []
 # 用于统计外键创建失败的计数
 foreignkey_failed_count = []
 
+# 用于统计视图创建失败的计数
+view_failed_count = []
+
 
 # source_table = input("请输入源表名称:")    # 手动从键盘获取源表名称
 # target_table = input("请输入目标表名称:")  # 手动从键盘获取目标表名称
@@ -231,7 +239,8 @@ def tbl_columns(table_name):
                                'type': 'TINYTEXT',  # 列字段类型以及长度范围
                                'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                'default': 'null',  # 字段默认值
-                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                               'comment': column[6]
                                }
                               )
 
@@ -241,7 +250,8 @@ def tbl_columns(table_name):
                                'type': 'VARCHAR' + '(' + str(column[2]) + ')',  # 列字段类型以及长度范围
                                'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                'default': column[7],  # 字段默认值
-                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                               'comment': column[6]
                                }
                               )
             elif column[7].upper() == '(USER)' or column[
@@ -250,7 +260,8 @@ def tbl_columns(table_name):
                                'type': 'VARCHAR' + '(' + str(column[2]) + ')',  # 列字段类型以及长度范围
                                'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                'default': '\'USER\'',  # 字段默认值
-                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                               'comment': column[6]
                                }
                               )
             else:  # 其余情况的默认值，MySQL保持默认不变
@@ -258,7 +269,8 @@ def tbl_columns(table_name):
                                'type': 'VARCHAR' + '(' + str(column[2]) + ')',  # 列字段类型以及长度范围
                                'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                'default': column[7],  # 字段默认值
-                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                               'comment': column[6]
                                }
                               )
 
@@ -270,7 +282,8 @@ def tbl_columns(table_name):
                                'type': 'DATETIME',  # 列字段类型以及长度范围
                                'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                'default': 'current_timestamp()',  # 字段默认值
-                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                               'comment': column[6]
                                }
                               )
             # 其他时间日期默认值保持不变(原模原样对应)
@@ -279,7 +292,8 @@ def tbl_columns(table_name):
                                'type': 'DATETIME',  # 列字段类型以及长度范围
                                'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                'default': column[7],  # 字段默认值
-                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                               'comment': column[6]
                                }
                               )
 
@@ -293,7 +307,8 @@ def tbl_columns(table_name):
                                'type': 'DECIMAL' + '(' + str(column[3]) + ',' + str(column[4]) + ')',  # 列字段类型以及长度范围
                                'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                'default': column[7],  # 字段默认值
-                               'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                               'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                               'comment': column[6]
                                }
                               )
             # 场景2：整数类型以及平均字段长度判断，如number(20,0)，如果AVG_COL_LEN比较大，映射为MySQL的bigint
@@ -305,7 +320,8 @@ def tbl_columns(table_name):
                                    'type': 'BIGINT',  # 列字段类型以及长度范围
                                    'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
-                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                                   'comment': column[6]
                                    }
                                   )
                 elif column[7].upper().startswith('NULL'):  # 对默认值的字符串值等于'null'的做判断
@@ -313,7 +329,8 @@ def tbl_columns(table_name):
                                    'type': 'BIGINT',  # 列字段类型以及长度范围
                                    'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
-                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                                   'comment': column[6]
                                    }
                                   )
                 else:  # 其余情况通过正则只提取数字部分，即去掉原Oracle中有括号的默认值
@@ -321,7 +338,8 @@ def tbl_columns(table_name):
                                    'type': 'BIGINT',  # 列字段类型以及长度范围
                                    'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                    'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值,正则方式仅提取数字
-                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                                   'comment': column[6]
                                    }
                                   )
 
@@ -333,7 +351,8 @@ def tbl_columns(table_name):
                                    'type': 'INT',  # 列字段类型以及长度范围
                                    'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
-                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                                   'comment': column[6]
                                    }
                                   )
                 elif column[7].upper().startswith('NULL'):  # 对默认值的字符串值等于'null'的做判断
@@ -341,7 +360,8 @@ def tbl_columns(table_name):
                                    'type': 'INT',  # 列字段类型以及长度范围
                                    'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
-                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                                   'comment': column[6]
                                    }
                                   )
                 else:  # 其余情况通过正则只提取数字部分，即去掉原Oracle中有括号的默认值
@@ -349,7 +369,8 @@ def tbl_columns(table_name):
                                    'type': 'INT',  # 列字段类型以及长度范围
                                    'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                    'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值去掉括号，仅提取数字
-                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                                   'comment': column[6]
                                    }
                                   )
 
@@ -361,7 +382,8 @@ def tbl_columns(table_name):
                                    'type': 'BIGINT',  # 列字段类型以及长度范围
                                    'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
-                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                                   'comment': column[6]
                                    }
                                   )
                 elif column[7].upper().startswith('NULL'):  # 对默认值的字符串值等于'null'的做判断
@@ -369,7 +391,8 @@ def tbl_columns(table_name):
                                    'type': 'BIGINT',  # 列字段类型以及长度范围
                                    'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
-                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                                   'comment': column[6]
                                    }
                                   )
                 else:  # 其余情况通过正则只提取数字部分，即去掉原Oracle中有括号的默认值
@@ -377,7 +400,8 @@ def tbl_columns(table_name):
                                    'type': 'BIGINT',  # 列字段类型以及长度范围
                                    'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                    'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值去掉括号，仅提取数字
-                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                                   'comment': column[6]
                                    }
                                   )
 
@@ -389,7 +413,8 @@ def tbl_columns(table_name):
                                    'type': 'INT',  # 列字段类型以及长度范围
                                    'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
-                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                                   'comment': column[6]
                                    }
                                   )
                 elif column[7].upper().startswith('NULL'):  # 对数据库中默认值字符串为'null'的判断
@@ -397,7 +422,8 @@ def tbl_columns(table_name):
                                    'type': 'INT',  # 列字段类型以及长度范围
                                    'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
-                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                                   'comment': column[6]
                                    }
                                   )
                 else:  # 其余情况number字段类型正则提取默认值数字部分
@@ -405,7 +431,8 @@ def tbl_columns(table_name):
                                    'type': 'INT',  # 列字段类型以及长度范围
                                    'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                    'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值去掉括号，仅提取数字
-                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                                   'comment': column[6]
                                    }
                                   )
 
@@ -416,7 +443,8 @@ def tbl_columns(table_name):
                                    'type': 'BIGINT',  # 列字段类型以及长度范围
                                    'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
-                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                                   'comment': column[6]
                                    }
                                   )
                 elif column[7].upper().startswith('NULL'):  # 数据库中字段类型默认值为字符串'null'的判断
@@ -424,7 +452,8 @@ def tbl_columns(table_name):
                                    'type': 'BIGINT',  # 列字段类型以及长度范围
                                    'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
-                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                                   'comment': column[6]
                                    }
                                   )
                 else:  # 其余情况number字段类型正则提取默认值数字部分
@@ -432,7 +461,8 @@ def tbl_columns(table_name):
                                    'type': 'BIGINT',  # 列字段类型以及长度范围
                                    'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                    'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值仅提取数字部分
-                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                                   'comment': column[6]
                                    }
                                   )
 
@@ -443,7 +473,8 @@ def tbl_columns(table_name):
                                    'type': 'INT',  # 列字段类型以及长度范围
                                    'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
-                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                                   'comment': column[6]
                                    }
                                   )
                 elif column[7].upper().startswith('NULL'):  # 数据库中字段类型默认值为字符串'null'的判断
@@ -451,7 +482,8 @@ def tbl_columns(table_name):
                                    'type': 'INT',  # 列字段类型以及长度范围
                                    'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
-                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                                   'comment': column[6]
                                    }
                                   )
                 else:  # 其余情况number字段类型正则提取默认值数字部分
@@ -459,7 +491,8 @@ def tbl_columns(table_name):
                                    'type': 'INT',  # 列字段类型以及长度范围
                                    'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                                    'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值，仅提取数字部分
-                                   'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                                   'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                                   'comment': column[6]
                                    }
                                   )
         # 大字段映射规则，文本类型大字段映射为MySQL类型longtext
@@ -468,7 +501,8 @@ def tbl_columns(table_name):
                            'type': 'LONGTEXT',  # 列字段类型以及长度范围
                            'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                            'default': column[7],  # 字段默认值
-                           'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                           'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                           'comment': column[6]
                            }
                           )
         # 大字段映射规则，16进制类型大字段映射为MySQL类型longblob
@@ -477,7 +511,8 @@ def tbl_columns(table_name):
                            'type': 'LONGBLOB',  # 列字段类型以及长度范围
                            'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                            'default': column[7],  # 字段默认值
-                           'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                           'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                           'comment': column[6]
                            }
                           )
         else:
@@ -485,7 +520,8 @@ def tbl_columns(table_name):
                            'type': column[1] + '(' + str(column[2]) + ')',  # 列字段类型以及长度范围
                            'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
                            'default': column[7],  # 字段默认值
-                           'isnull': column[5]  # 字段是否允许为空，true为允许，否则为false
+                           'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                           'comment': column[6]
                            }
 
                           )
@@ -509,14 +545,21 @@ def create_table(table_name):
     # 以下字段已映射为MySQL字段类型
     for struct in structs:
         defaultvalue = struct.get('default')
-        if defaultvalue:
+        commentvalue = struct.get('comment')
+        if defaultvalue:  # 对默认值以及注释数据类型的判断，如果不是str类型，转为str类型
             defaultvalue = "'{0}'".format(defaultvalue) if type(defaultvalue) == 'str' else str(defaultvalue)
-        fieldinfos.append('{0} {1} {2} {3}'.format(struct['fieldname'],
-                                                   struct['type'],
-                                                   # 'primary key' if struct.get('primary') else '',主键在创建表的时候定义
-                                                   # ('default ' + '\'' + defaultvalue + '\'') if defaultvalue else '',
-                                                   ('default ' + defaultvalue) if defaultvalue else '',
-                                                   '' if struct.get('isnull') else 'not null'))
+        if commentvalue:
+            commentvalue = "'{0}'".format(commentvalue) if type(commentvalue) == 'str' else str(commentvalue)
+        fieldinfos.append('{0} {1} {2} {3} {4}'.format(struct['fieldname'],
+                                                       struct['type'],
+                                                       # 'primary key' if struct.get('primary') else '',主键在创建表的时候定义
+                                                       # ('default ' + '\'' + defaultvalue + '\'') if defaultvalue else '',
+                                                       ('default ' + defaultvalue) if defaultvalue else '',
+                                                       '' if struct.get('isnull') else 'not null',
+                                                       ('comment ' + '\'' + commentvalue + '\'') if commentvalue else ''
+                                                       ),
+
+                          )
     create_table_sql = 'create table {0} ({1})'.format(table_name, ','.join(fieldinfos))  # 生成创建目标表的sql
     # add_pri_key_sql = 'alter table {0} add primary key ({1})'.format(table_name, ','.join(v_pri_key))  # 创建目标表之后增加主键
     print('\nCREATE TABLE SQL:\n')
@@ -539,7 +582,7 @@ def create_table(table_name):
             pass
         '''
         print(traceback.format_exc())  # 如果某张表创建失败，遇到异常记录到log，会继续创建下张表
-        print_ddl_failed_table(table_name,create_table_sql)  # ddl创建失败的表名记录到文件/tmp/ddl_failed_table.log
+        print_ddl_failed_table(table_name, create_table_sql)  # ddl创建失败的表名记录到文件/tmp/ddl_failed_table.log
         ddl_failed_table_result.append(table_name)  # 将当前ddl创建失败的表名记录到ddl_failed_table_result的list中
         ddl_create_error_table = traceback.format_exc()
         logging.error(ddl_create_error_table)  # ddl创建失败的sql语句输出到文件/tmp/ddl_failed_table.log
@@ -733,6 +776,56 @@ def auto_increament_col():
     cur_oracle_result.execute("""
     drop table trigger_name purge
     """)
+
+
+# 获取视图定义以及创建
+def create_view():
+    print('#' * 50 + '开始创建视图' + '#' * 50)
+    # Oracle中无法对long类型数据截取，创建用于存储视图信息的临时表content_view
+    cur_oracle_result.execute("""
+        select count(*) from user_tables where table_name='CONTENT_VIEW'
+        """)
+    count_num_view = cur_oracle_result.fetchone()[0]
+    if count_num_view:
+        cur_oracle_result.execute("""
+                truncate table CONTENT_VIEW
+                """)
+        cur_oracle_result.execute("""
+                    insert into content_view(view_name,text) select view_name,to_lob(text) from USER_VIEWS
+                    """)
+    else:
+        cur_oracle_result.execute("""
+                        create table content_view (view_name varchar2(200),text clob)
+                        """)
+        cur_oracle_result.execute("""
+            insert into content_view(view_name,text) select view_name,to_lob(text) from USER_VIEWS
+            """)
+    cur_source_constraint.execute("""
+    select  view_name,'create view '||view_name||' as '||replace(text, '"'  , '') as view_sql from CONTENT_VIEW
+    """)
+    for e in cur_source_constraint:
+        view_name = e[0]
+        create_view_sql = e[1]
+        print(create_view_sql)
+        try:
+            cur_target_constraint.execute("""drop view  if exists %s""" % view_name)
+            cur_target_constraint.execute(create_view_sql)
+            print('视图创建完毕\n')
+        except Exception:
+            view_failed_count.append('1')  # 视图创建失败就往list对象存1
+            print('视图创建失败请检查ddl语句!\n')
+            print(traceback.format_exc())
+            filename = '/tmp/ddl_failed_table.log'
+            f = open(filename, 'a', encoding='utf-8')
+            f.write('/' + '*' * 50 + 'VIEW CREATE ERROR' + '*' * 50 + '/\n')
+            f.write(create_view_sql + '\n\n\n')
+            f.close()
+            ddl_view_error = traceback.format_exc()
+            logging.error(ddl_view_error)  # 视图创建失败的sql语句输出到文件/tmp/ddl_failed_table.log
+    print('\033[31m*' * 50 + '视图创建完成' + '*' * 50 + '\033[0m\n\n\n')
+    cur_oracle_result.execute("""
+            drop table content_view purge
+            """)
 
 
 # 仅输出Oracle当前用户的表，即user_tables的table_name
@@ -942,6 +1035,7 @@ if __name__ == '__main__':
     create_meta_foreignkey()  # 4、创建外键
     mig_database()  # 5、迁移数据 (只迁移DDL创建成功的表)
     auto_increament_col()  # 6、增加自增列
+    create_view()  # 7、创建视图
     endtime = datetime.datetime.now()
     print("Oracle迁移数据到MySQL完毕,一共耗时" + str((endtime - starttime).seconds) + "秒")
     print('-' * 100)
@@ -967,7 +1061,7 @@ if __name__ == '__main__':
 
     mig_summary()
     print('\n请检查创建失败的表DDL以及约束。有关更多详细信息，请参阅迁移输出信息')
-    print('迁移日志已保存到"/tmp/mig.log"')
+    print('迁移日志已保存到/tmp/mig.log\n有关迁移错误请查看/tmp/ddl_failed_table.log')
 cur_select.close()
 cur_insert_mysql.close()
 source_db.close()
