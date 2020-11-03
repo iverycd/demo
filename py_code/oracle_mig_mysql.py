@@ -2,9 +2,13 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.3.6.2
+# V1.3.6.3
 """
 MODIFY HISTORY
+****************************************************
+V1.3.6.3
+2020.11.3 11:20
+优化异常log记录方式
 ****************************************************
 V1.3.6.2
 2020.11.2
@@ -107,7 +111,7 @@ class Logger(object):
 
 sys.stdout = Logger(stream=sys.stdout)
 os.environ['NLS_LANG'] = 'SIMPLIFIED CHINESE_CHINA.UTF8'  # 设置字符集为UTF8，防止中文乱码
-ora_conn = 'NJJBXQ_DJGBZ/11111@192.168.189.208:1522/orcl11g'
+ora_conn = 'test2/oracle@192.168.189.208:1522/orcl11g'
 mysql_conn = '192.168.189.208'
 mysql_target_db = 'test2'
 source_db = cx_Oracle.connect(ora_conn)  # 源库Oracle的数据库连接
@@ -120,8 +124,8 @@ cur_insert_mysql = target_db.cursor()  # 目标库MySQL插入目标表执行的�
 cur_drop_table = target_db.cursor()  # 在MySQL清除表 drop table if exists
 cur_source_constraint = source_db.cursor()
 cur_target_constraint = target_db.cursor()
-cur_oracle_result.arraysize = 5000  # Oracle数据库游标对象结果集返回的行数即每次获取多少行
-cur_insert_mysql.arraysize = 5000  # MySQL数据库批量插入的行数
+cur_oracle_result.arraysize = 20000  # Oracle数据库游标对象结果集返回的行数即每次获取多少行
+cur_insert_mysql.arraysize = 20000  # MySQL数据库批量插入的行数
 
 
 # clob、blob、nclob要在读取源表前加载outputtypehandler属性,即将Oracle大字段转为string类型
@@ -535,7 +539,7 @@ def create_table(table_name):
             pass
         '''
         print(traceback.format_exc())  # 如果某张表创建失败，遇到异常记录到log，会继续创建下张表
-        print_ddl_failed_table(table_name)  # ddl创建失败的表名记录到文件/tmp/ddl_failed_table.log
+        print_ddl_failed_table(table_name,create_table_sql)  # ddl创建失败的表名记录到文件/tmp/ddl_failed_table.log
         ddl_failed_table_result.append(table_name)  # 将当前ddl创建失败的表名记录到ddl_failed_table_result的list中
         ddl_create_error_table = traceback.format_exc()
         logging.error(ddl_create_error_table)  # ddl创建失败的sql语句输出到文件/tmp/ddl_failed_table.log
@@ -585,11 +589,16 @@ def user_constraint():
             cur_target_constraint.execute(create_index_sql)
             print('约束以及索引创建完毕\n')
         except Exception:
-            constraint_failed_count.append('1')  # 用来统计主键或者索引创建失败的技术，只要创建失败就往list存1
+            constraint_failed_count.append('1')  # 用来统计主键或者索引创建失败的计数，只要创建失败就往list存1
             print('约束或者索引创建失败请检查ddl语句!\n')
             print(traceback.format_exc())
-            # constraint_error_table = traceback.format_exc()  # 这里记下索引创建失败的sql在 ddl_failed_table.log
-            # logging.error(constraint_error_table)  # ddl创建失败的sql语句输出到文件/tmp/constraint_error_table.log
+            filename = '/tmp/ddl_failed_table.log'
+            f = open(filename, 'a', encoding='utf-8')
+            f.write('/' + '*' * 50 + 'PK AND INDEX CREATE ERROR' + '*' * 50 + '/\n')
+            f.write(create_index_sql + '\n\n\n')
+            f.close()
+            constraint_error_table = traceback.format_exc()  # 这里记下索引创建失败的sql在 ddl_failed_table.log
+            logging.error(constraint_error_table)  # ddl创建失败的sql语句输出到文件/tmp/constraint_error_table.log
 
 
 # 创建外键
@@ -616,6 +625,13 @@ def user_foreign_key(table_name):
             foreignkey_failed_count.append('1')  # 外键创建失败就往list对象存1
             print('外键创建失败请检查ddl语句!\n')
             print(traceback.format_exc())
+            filename = '/tmp/ddl_failed_table.log'
+            f = open(filename, 'a', encoding='utf-8')
+            f.write('/' + '*' * 50 + 'FOREIGNKEY CREATE ERROR' + '*' * 50 + '/\n')
+            f.write(create_foreign_key_sql + '\n\n\n')
+            f.close()
+            ddl_foreignkey_error = traceback.format_exc()
+            logging.error(ddl_foreignkey_error)  # 外键创建失败的sql语句输出到文件/tmp/ddl_failed_table.log
 
 
 # 调用user_foreign_key函数批量创建外键
@@ -685,6 +701,13 @@ def auto_increament_col():
         except Exception:
             print('用于自增列的索引创建失败，请检查源触发器！\n')
             print(traceback.format_exc())
+            filename = '/tmp/ddl_failed_table.log'
+            f = open(filename, 'a', encoding='utf-8')
+            f.write('/' + '*' * 50 + 'FOR AUTOCREAMENT INDEX CREATE ERROR' + '*' * 50 + '/\n')
+            f.write(create_autoincrea_index + '\n\n\n')
+            f.close()
+            ddl_incindex_error = traceback.format_exc()
+            logging.error(ddl_incindex_error)  # 自增用索引创建失败的sql语句输出到文件/tmp/ddl_failed_table.log
 
     print('开始修改自增列属性：')
     cur_oracle_result.execute("""
@@ -699,6 +722,13 @@ def auto_increament_col():
         except Exception:  # 如果有异常打印异常信息，并跳过继续下个自增列修改
             print('修改自增列失败，请检查源触发器！\n')
             print(traceback.format_exc())
+            filename = '/tmp/ddl_failed_table.log'
+            f = open(filename, 'a', encoding='utf-8')
+            f.write('/' + '*' * 50 + 'MODIFY AUTOCREAMENT COL ERROR' + '*' * 50 + '/\n')
+            f.write(alter_increa_col + '\n\n\n')
+            f.close()
+            ddl_increa_col_error = traceback.format_exc()
+            logging.error(ddl_increa_col_error)  # 自增用索引创建失败的sql语句输出到文件/tmp/ddl_failed_table.log
     print('\033[31m*' * 50 + '自增列修改完成' + '*' * 50 + '\033[0m\n\n\n')
     cur_oracle_result.execute("""
     drop table trigger_name purge
@@ -720,10 +750,11 @@ def print_table():
 
 
 # 打印输出DDL创建失败的sql语句
-def print_ddl_failed_table(table_name):
+def print_ddl_failed_table(table_name, p1):
     filename = '/tmp/ddl_failed_table.log'
     f = open(filename, 'a', encoding='utf-8')
     f.write('/' + '*' * 50 + 'TABLE: ' + table_name + '*' * 50 + '/\n')
+    f.write(p1 + '\n\n\n')
     f.close()
 
 
@@ -744,7 +775,7 @@ def print_insert_failed_table(table_name):
 
 
 # 批量将Oracle数据插入到MySQL的方法
-def mig_table(tablename, write_fail):
+def mig_table(tablename):
     target_table = source_table = tablename
     if source_db_type.upper() == 'ORACLE':
         get_column_length = 'select count(*) from user_tab_columns where table_name= ' + "'" + source_table.upper() + "'"  # 拼接获取源表有多少个列的SQL
@@ -777,10 +808,15 @@ def mig_table(tablename, write_fail):
         except Exception as e:
             print(traceback.format_exc())  # 遇到异常记录到log，会继续迁移下张表
             #  print(tablename, '表记录', rows, '插入失败') 插入失败时输出insert语句
-            if write_fail == 1:
-                print_insert_failed_table(tablename)
-            else:
-                continue
+            print_insert_failed_table(tablename)
+            filename = '/tmp/ddl_failed_table.log'
+            f = open(filename, 'a', encoding='utf-8')
+            f.write('/' + '*' * 50 + 'INSERT ERROR' + '*' * 50 + '/\n')
+            f.write(insert_sql + '\n\n\n')
+            f.close()
+            sql_insert_error = traceback.format_exc()
+            logging.error(sql_insert_error)  # 插入失败的sql语句输出到文件/tmp/ddl_failed_table.log
+
         if not rows:
             break  # 当前表游标获取不到数据之后中断循环，返回到mig_database，可以继续下个表
         source_effectrow = cur_oracle_result.rowcount  # 计数源表插入的行数
@@ -815,7 +851,7 @@ def mig_database():
             print('-' * 50 + tbl_name + '正在迁移数据' + '-' * 50)
             # print("\033[31m开始表数据迁移：\033[0m\n")
             print(tbl_name)
-            mig_table(tbl_name, 1)
+            mig_table(tbl_name)
             print(tbl_name + '数据插入完毕', time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), '\n')
         print('\033[31m*' * 50 + '表数据迁移完成' + '*' * 50 + '\033[0m\n\n\n')
     f.close()
@@ -829,7 +865,7 @@ def mig_failed_table():
         for row in reader:
             tbl_name = row[0]
             print("\033[31m开始迁移：\033[0m" + tbl_name)
-            mig_table(tbl_name, 0)
+            mig_table(tbl_name)
             is_continue = input('是否结束：Y|N\n')
             print(tbl_name + '插入完毕', time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
             '''
