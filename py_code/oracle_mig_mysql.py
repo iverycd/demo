@@ -2,9 +2,14 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.3.7
+# V1.3.7.1
 """
 MODIFY HISTORY
+****************************************************
+V1.3.7.1
+2020.11.4
+1、增加表对象的comment属性支持
+2、优化计数统计
 ****************************************************
 V1.3.7
 2020.11.3
@@ -160,6 +165,15 @@ foreignkey_failed_count = []
 
 # 用于统计视图创建失败的计数
 view_failed_count = []
+
+# 用于统计注释添加失败的计数
+comment_failed_count = []
+
+# 用于统计Oracle中自增列的计数
+oracle_autocol_total = []
+
+# 用于统计MySQL中自增列创建失败的计数
+autocol_failed_count = []
 
 
 # source_table = input("请输入源表名称:")    # 手动从键盘获取源表名称
@@ -735,6 +749,10 @@ def auto_increament_col():
     cur_oracle_result.execute("""
     select 'create  index ids_'||substr(table_name,1,26)||' on '||table_name||'('||upper(substr(substr(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.')), 1, instr(upper(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.'))), ' FROM DUAL;') - 1), 5)) ||');' as sql_create from trigger_name where instr(upper(trigger_body), 'NEXTVAL')>0
     """)  # 在Oracle拼接生成用于在MySQL中自增列的索引
+    cur_oracle_result.execute("""
+    select count(*) from trigger_name  where instr(upper(trigger_body), 'NEXTVAL')>0
+    """)
+    oracle_autocol_total.append(cur_oracle_result.fetchone()[0])  # 将自增列的总数存入list
     print('创建用于自增列的索引:\n ')
     for v_increa_index in cur_oracle_result:
         create_autoincrea_index = v_increa_index[0]
@@ -763,6 +781,7 @@ def auto_increament_col():
         try:  # 注意下try要在for里面
             cur_insert_mysql.execute(alter_increa_col)
         except Exception:  # 如果有异常打印异常信息，并跳过继续下个自增列修改
+            autocol_failed_count.append('1')
             print('修改自增列失败，请检查源触发器！\n')
             print(traceback.format_exc())
             filename = '/tmp/ddl_failed_table.log'
@@ -826,6 +845,35 @@ def create_view():
     cur_oracle_result.execute("""
             drop table content_view purge
             """)
+
+
+# 数据库对象的comment注释
+def create_comment():
+    print('#' * 50 + '开始添加comment注释' + '#' * 50)
+    cur_source_constraint.execute("""
+    select TABLE_NAME,'alter table '||TABLE_NAME||' comment '||''''||COMMENTS||'''' as create_comment
+ from USER_TAB_COMMENTS where COMMENTS is not null
+    """)
+    for e in cur_source_constraint:
+        table_name = e[0]
+        create_comment_sql = e[1]
+        print(create_comment_sql)
+        try:
+            print('正在添加' + table_name + '的注释:')
+            cur_target_constraint.execute(create_comment_sql)
+            print('comment注释添加完毕\n')
+        except Exception:
+            comment_failed_count.append('1')  # comment添加失败就往list对象存1
+            print('comment添加失败请检查ddl语句!\n')
+            print(traceback.format_exc())
+            filename = '/tmp/ddl_failed_table.log'
+            f = open(filename, 'a', encoding='utf-8')
+            f.write('/' + '*' * 50 + 'COMMENT CREATE ERROR' + '*' * 50 + '/\n')
+            f.write(create_comment_sql + '\n\n\n')
+            f.close()
+            ddl_comment_error = traceback.format_exc()
+            logging.error(ddl_comment_error)  # comment注释创建失败的sql语句输出到文件/tmp/ddl_failed_table.log
+    print('\033[31m*' * 50 + 'comment注释添加完成' + '*' * 50 + '\033[0m\n\n\n')
 
 
 # 仅输出Oracle当前用户的表，即user_tables的table_name
@@ -994,6 +1042,9 @@ def mig_summary():
     oracle_constraint_count = cur_select.fetchone()[0]
     cur_select.execute("""select count(*) from USER_CONSTRAINTS where CONSTRAINT_TYPE='R'""")
     oracle_fk_count = cur_select.fetchone()[0]
+    cur_select.execute("""select count(*) from USER_VIEWS""")
+    oracle_view_count = cur_select.fetchone()[0]
+    oracle_autocol_count = oracle_autocol_total[0]
     # Oracle源表信息
 
     # MySQL迁移计数
@@ -1005,19 +1056,28 @@ def mig_summary():
         mysql_table_count += 1
     table_failed_count = len(ddl_failed_table_result)
     index_failed_count = len(constraint_failed_count)
+    view_error_count = len(view_failed_count)
     fk_failed_count = len(foreignkey_failed_count)
+    comment_error_count = len(comment_failed_count)
+    autocol_error_count = len(autocol_failed_count)
     # MySQL迁移计数
+
     print('\033[31m*' * 50 + '数据迁移摘要' + '*' * 50 + '\033[0m\n\n\n')
     print('源数据库模式名: ' + oracle_schema)
-    print('源表数量计数: ' + str(oracle_tab_count))
-    print('源表约束以及索引数量计数: ' + str(oracle_constraint_count))
-    print('源表外键数量计数: ' + str(oracle_fk_count))
+    print('1、源表数量计数: ' + str(oracle_tab_count))
+    print('2、源视图数量计数: ' + str(oracle_view_count))
+    print('3、源触发器自增列计数：' + str(oracle_autocol_count))
+    print('4、源表约束以及索引数量计数: ' + str(oracle_constraint_count))
+    print('5、源表外键数量计数: ' + str(oracle_fk_count))
     print('\n\n\n')
     print('目标数据库: ' + mysql_database_name)
-    print('表成功创建计数: ' + str(mysql_table_count))
-    print('表创建失败计数: ' + str(table_failed_count))
-    print('表索引以及约束创建失败计数: ' + str(index_failed_count))
-    print('外键创建失败计数: ' + str(fk_failed_count))
+    # print('目标表成功创建计数: ' + str(mysql_table_count))
+    print('1、目标表创建失败计数: ' + str(table_failed_count))
+    print('2、目标视图创建失败计数: ' + str(view_error_count))
+    print('3、目标自增列修改失败计数: ' + str(autocol_error_count))
+    print('4、目标表索引以及约束创建失败计数: ' + str(index_failed_count))
+    print('5、目标外键创建失败计数: ' + str(fk_failed_count))
+   #  print('目标注释添加失败计数: ' + str(comment_error_count))
 
 
 if __name__ == '__main__':
@@ -1036,6 +1096,7 @@ if __name__ == '__main__':
     mig_database()  # 5、迁移数据 (只迁移DDL创建成功的表)
     auto_increament_col()  # 6、增加自增列
     create_view()  # 7、创建视图
+    create_comment()  # 8、添加注释
     endtime = datetime.datetime.now()
     print("Oracle迁移数据到MySQL完毕,一共耗时" + str((endtime - starttime).seconds) + "秒")
     print('-' * 100)
@@ -1043,7 +1104,7 @@ if __name__ == '__main__':
         print("DDL创建失败的表如下：")
         for output_ddl_failed_table_result in ddl_failed_table_result:
             print(output_ddl_failed_table_result)
-        print('-' * 100)
+        print('\n\n\n')
         '''
         # 再次对失败的表迁移数据
                 is_continue = input('是否再次迁移失败的表：Y|N\n')
