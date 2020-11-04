@@ -2,9 +2,13 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.3.7.1
+# V1.3.8
 """
 MODIFY HISTORY
+****************************************************
+V1.3.8
+2020.11.4
+修改创建表为并行创建
 ****************************************************
 V1.3.7.1
 2020.11.4
@@ -103,6 +107,8 @@ import traceback
 import decimal
 import re
 import logging
+from multiprocessing.dummy import Pool as ThreadPool, Lock
+import threading
 
 
 # 记录执行日志
@@ -119,9 +125,11 @@ class Logger(object):
         pass
 
 
+list_table_name = []
+lock = threading.Lock()
 sys.stdout = Logger(stream=sys.stdout)
 os.environ['NLS_LANG'] = 'SIMPLIFIED CHINESE_CHINA.UTF8'  # 设置字符集为UTF8，防止中文乱码
-ora_conn = 'test2/oracle@192.168.189.208:1522/orcl11g'
+ora_conn = 'NJJBXQ_DJGBZ/11111@192.168.189.208:1522/orcl11g'
 mysql_conn = '192.168.189.208'
 mysql_target_db = 'test2'
 source_db = cx_Oracle.connect(ora_conn)  # 源库Oracle的数据库连接
@@ -551,6 +559,7 @@ def create_table(table_name):
     logging.basicConfig(filename='/tmp/ddl_failed_table.log')
     # 在MySQL创建表前先删除存在的表
     drop_target_table = 'drop table if exists ' + table_name
+    lock.acquire()
     cur_drop_table.execute(drop_target_table)
     cur_createtbl = target_db.cursor()
     fieldinfos = []
@@ -601,6 +610,7 @@ def create_table(table_name):
         ddl_create_error_table = traceback.format_exc()
         logging.error(ddl_create_error_table)  # ddl创建失败的sql语句输出到文件/tmp/ddl_failed_table.log
         print('表' + table_name + '创建失败请检查ddl语句!\n')
+    lock.release()
 
 
 # 用来创建目标索引的函数
@@ -968,6 +978,19 @@ def mig_table(tablename):
 
 # 在MySQL创建表结构以及添加主键
 def create_meta_table():
+    cur_tblprt = source_db.cursor()  # 生成用于输出表名的游标对象
+    tableoutput_sql = 'select table_name from user_tables  order by table_name  desc'  # 查询需要导出的表
+    cur_tblprt.execute(tableoutput_sql)
+    for v_table in cur_tblprt:
+        list_table_name.append(v_table[0])
+    # print(list_table_name)
+    print('-' * 100)
+    pool = ThreadPool()
+    pool.map(create_table, list_table_name)
+    pool.close()
+    pool.join()
+    print('\033[31m*' * 50 + '表创建完成' + '*' * 50 + '\033[0m\n\n\n')
+    '''
     filename = '/tmp/table_name.csv'  # 从user_tables输出的表
     with open(filename) as f:
         reader = csv.reader(f)
@@ -979,6 +1002,7 @@ def create_meta_table():
             create_table(tbl_name)  # 调用Oracle映射到MySQL规则的函数
         print('\033[31m*' * 50 + '表创建完成' + '*' * 50 + '\033[0m\n\n\n')
     f.close()
+    '''
 
 
 # 从csv文件读取源库需要迁移的表，调用mig_table(tbl_name, 1)，插入表数据，并输出迁移失败的表
@@ -1077,7 +1101,9 @@ def mig_summary():
     print('3、目标自增列修改失败计数: ' + str(autocol_error_count))
     print('4、目标表索引以及约束创建失败计数: ' + str(index_failed_count))
     print('5、目标外键创建失败计数: ' + str(fk_failed_count))
-   #  print('目标注释添加失败计数: ' + str(comment_error_count))
+
+
+#  print('目标注释添加失败计数: ' + str(comment_error_count))
 
 
 if __name__ == '__main__':
