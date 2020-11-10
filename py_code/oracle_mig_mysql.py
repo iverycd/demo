@@ -2,9 +2,14 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.3.8.1
+# V1.3.9
 """
 MODIFY HISTORY
+****************************************************
+V1.3.9
+2020.11.10
+1、在创建表的时候改为使用连接池
+2、添加MySQL连接池
 ****************************************************
 V1.3.8.1
 2020.11.5
@@ -12,7 +17,7 @@ V1.3.8.1
 ****************************************************
 V1.3.8
 2020.11.4
-修改创建表为并行创建
+1、修改创建表为并行创建
 ****************************************************
 V1.3.7.1
 2020.11.4
@@ -111,8 +116,202 @@ import traceback
 import decimal
 import re
 import logging
-from multiprocessing.dummy import Pool as ThreadPool
-import threading
+# from multiprocessing.dummy import Pool as ThreadPool
+# import threading
+from multiprocessing import Process  # 下面用了动态变量执行多进程，所以这里是灰色
+from dbutils.pooled_db import PooledDB
+
+MySQLPOOL = PooledDB(
+    creator=pymysql,  # 使用链接数据库的模块
+    maxconnections=0,  # 连接池允许的最大连接数，0和None表示不限制连接数
+    mincached=10,  # 初始化时，链接池中至少创建的空闲的链接，0表示不创建
+    maxcached=0,  # 链接池中最多闲置的链接，0和None不限制
+    maxshared=3,
+    # 链接池中最多共享的链接数量，0和None表示全部共享。PS: 无用，因为pymysql和MySQLdb等模块的 threadsafety都为1，所有值无论设置为多少，_maxcached永远为0，所以永远是所有链接都共享。
+    blocking=True,  # 连接池中如果没有可用连接后，是否阻塞等待。True，等待；False，不等待然后报错
+    maxusage=None,  # 一个链接最多被重复使用的次数，None表示无限制
+    setsession=[],  # 开始会话前执行的命令列表。
+    ping=0,
+    # ping MySQL服务端，检查是否服务可用。
+    host='192.168.189.208',
+    port=3306,
+    user='root',
+    password='Gepoint',
+    database='test2',
+    charset='utf8mb4'
+)
+
+
+class OraclePool:
+    """
+    1) 这里封装了一些有关oracle连接池的功能;
+    2) sid和service_name，程序会自动判断哪个有值，
+        若两个都有值，则默认使用service_name；
+    3) 关于config的设置，注意只有 port 的值的类型是 int，以下是config样例:
+        config = {
+            'user':         'maixiaochai',
+            'password':     'maixiaochai',
+            'host':         '192.168.158.1',
+            'port':         1521,
+            'sid':          'maixiaochai',
+            'service_name': 'maixiaochai'
+        }
+    """
+
+    def __init__(self, config):
+        """
+        获得连接池
+        :param config:      dict    Oracle连接信息
+        """
+        self.__pool = self.__get_pool(config)
+
+    @staticmethod
+    def __get_pool(config):
+        """
+        :param config:        dict    连接Oracle的信息
+        ---------------------------------------------
+        以下设置，根据需要进行配置
+        maxconnections=6,   # 最大连接数，0或None表示不限制连接数
+        mincached=2,        # 初始化时，连接池中至少创建的空闲连接。0表示不创建
+        maxcached=5,        # 连接池中最多允许的空闲连接数，很久没有用户访问，连接池释放了一个，由6个变为5个，
+                            # 又过了很久，不再释放，因为该项设置的数量为5
+        maxshared=0,        # 在多个线程中，最多共享的连接数，Python中无用，会最终设置为0
+        blocking=True,      # 没有闲置连接的时候是否等待， True，等待，阻塞住；False，不等待，抛出异常。
+        maxusage=None,      # 一个连接最多被使用的次数，None表示无限制
+        setession=[],       # 会话之前所执行的命令, 如["set charset ...", "set datestyle ..."]
+        ping=0,             # 0  永远不ping
+                            # 1，默认值，用到连接时先ping一下服务器
+                            # 2, 当cursor被创建时ping
+                            # 4, 当SQL语句被执行时ping
+                            # 7, 总是先ping
+        """
+        dsn = None
+        host, port = config.get('host'), config.get('port')
+
+        if 'service_name' in config:
+            dsn = cx_Oracle.makedsn(host, port, service_name=config.get('service_name'))
+
+        elif 'sid' in config:
+            dsn = cx_Oracle.makedsn(host, port, sid=config.get('sid'))
+
+        pool = PooledDB(
+            cx_Oracle,
+            mincached=5,
+            maxcached=10,
+            user=config.get('user'),
+            password=config.get('password'),
+            dsn=dsn
+        )
+
+        return pool
+
+    def __get_conn(self):
+        """
+        从连接池中获取一个连接，并获取游标。
+        :return: conn, cursor
+        """
+        conn = self.__pool.connection()
+        cursor = conn.cursor()
+
+        return conn, cursor
+
+    @staticmethod
+    def __reset_conn(conn, cursor):
+        """
+        把连接放回连接池。
+        :return:
+        """
+        cursor.close()
+        conn.close()
+
+    def __execute(self, sql, args=None):
+        """
+        执行sql语句
+        :param sql:     str     sql语句
+        :param args:    list    sql语句参数列表
+        :param return:  cursor
+        """
+        conn, cursor = self.__get_conn()
+
+        if args:
+            cursor.execute(sql, args)
+        else:
+            cursor.execute(sql)
+
+        return conn, cursor
+
+    def fetch_all(self, sql, args=None):
+        """
+        获取全部结果
+        :param sql:     str     sql语句
+        :param args:    list    sql语句参数
+        :return:        tuple   fetch结果
+        """
+        conn, cursor = self.__execute(sql, args)
+        result = cursor.fetchall()
+        self.__reset_conn(conn, cursor)
+
+        return result
+
+    def fetch_one(self, sql, args=None):
+        """
+        获取全部结果
+        :param sql:     str     sql语句
+        :param args:    list    sql语句参数
+        :return:        tuple   fetch结果
+        """
+        conn, cursor = self.__execute(sql, args)
+        result = cursor.fetchone()
+        self.__reset_conn(conn, cursor)
+
+        return result
+
+    def fetch_many(self, sql, args=None):
+        conn = self.__pool.connection()
+        cur = conn.cursor()
+        try:
+            cur.execute(sql, args)
+            while True:
+                row = cur.fetchone()
+                if row is None:
+                    break
+                # 在此编写你想做的操作
+                return row
+        except Exception as e:
+            print('异常信息:' + str(e))
+
+    def execute_sql(self, sql, args=None):
+        """
+        执行SQL语句。
+        :param sql:     str     sql语句
+        :param args:    list    sql语句参数
+        :return:        tuple   fetch结果
+        """
+        conn, cursor = self.__execute(sql, args)
+        conn.commit()
+        self.__reset_conn(conn, cursor)
+
+    def __del__(self):
+        """
+        关闭连接池。
+        """
+        self.__pool.close()
+
+
+config = {
+    'user': 'NJJBXQ_DJGBZ',
+    'password': '11111',
+    'host': '192.168.189.208',
+    'port': 1522,
+    'service_name': 'orcl11g'
+}
+# cur_tbl_columns = OraclePool(config)  # Oracle连接池
+oracle_cursor = OraclePool(config)  # Oracle连接池
+mysql_conn = MySQLPOOL.connection()  # MySQL连接池
+mysql_cursor = mysql_conn.cursor()
+
+
+# pool2 = PooledDB(cx_Oracle, user='NJJBXQ_DJGBZ', password='11111', dsn='192.168.189.208:1522/orcl11g', mincached=5, maxcached=20)
 
 
 # 记录执行日志
@@ -131,10 +330,12 @@ class Logger(object):
 
 list_table_name = []  # 查完user_tables即当前用户所有表存入list
 list_success_table = []  # 创建成功的表存入到list
-lock = threading.Lock()  # 用于游标在执行时增加以及释放锁
+new_list = []
+# lock = threading.Lock()  # 用于游标在执行时增加以及释放锁
 sys.stdout = Logger(stream=sys.stdout)
 os.environ['NLS_LANG'] = 'SIMPLIFIED CHINESE_CHINA.UTF8'  # 设置字符集为UTF8，防止中文乱码
-ora_conn = 'test2/oracle@192.168.189.208:1522/orcl11g'  # NJJBXQ_DJGBZ
+# ora_conn = 'test2/oracle@192.168.189.208:1522/orcl11g'  # NJJBXQ_DJGBZ
+ora_conn = 'NJJBXQ_DJGBZ/11111@192.168.189.208:1522/orcl11g'  # NJJBXQ_DJGBZ
 mysql_conn = '192.168.189.208'
 mysql_target_db = 'test2'
 source_db = cx_Oracle.connect(ora_conn)  # 源库Oracle的数据库连接
@@ -142,6 +343,7 @@ target_db = pymysql.connect(mysql_conn, "root", "Gepoint", mysql_target_db)  # �
 source_db_type = 'Oracle'  # 大小写无关，后面会被转为大写
 target_db_type = 'MySQL'  # 大小写无关，后面会被转为大写
 cur_select = source_db.cursor()  # 源库Oracle查询源表有几列
+cur_tblprt = source_db.cursor()  # 生成用于输出表名的游标对象
 cur_oracle_result = source_db.cursor()  # 查询Oracle源表的游标结果集
 cur_insert_mysql = target_db.cursor()  # 目标库MySQL插入目标表执行的插入sql
 cur_createtbl = target_db.cursor()
@@ -168,6 +370,7 @@ def dataconvert(cursor, name, defaultType, size, precision, scale):
 
 cur_oracle_result.outputtypehandler = dataconvert  # 查询Oracle表数据结果集的游标
 cur_source_constraint.outputtypehandler = dataconvert  # 查询Oracle主键以及索引、外键的游标
+
 # 用于记录ddl创建失败的表名
 ddl_failed_table_result = []
 
@@ -192,6 +395,24 @@ autocol_failed_count = []
 
 # source_table = input("请输入源表名称:")    # 手动从键盘获取源表名称
 # target_table = input("请输入目标表名称:")  # 手动从键盘获取目标表名称
+
+def list_of_groups(init_list, children_list_len):
+    list_of_groups = zip(*(iter(init_list),) * children_list_len)
+    end_list = [list(i) for i in list_of_groups]
+    count = len(init_list) % children_list_len
+    end_list.append(init_list[-count:]) if count != 0 else end_list
+    return end_list
+
+
+def split_list():
+    print_table()
+    n = round(len(list_table_name) / 2)
+    # n = 242
+    print(n)
+    print('原始list：', list_table_name, '\n')
+    new_list.append(list_of_groups(list_table_name, n))
+    print('一分为二：', new_list)
+
 
 # 打印连接信息
 def print_source_info():
@@ -239,18 +460,20 @@ def table_primary(table_name):
 
 # 获取Oracle的列字段类型以及字段长度以及映射数据类型到MySQL的规则
 def tbl_columns(table_name):
-    cur_tbl_columns = source_db.cursor()
-    cur_tbl_columns.execute("""SELECT A.COLUMN_NAME, A.DATA_TYPE, A.DATA_LENGTH, case when A.DATA_PRECISION is null then -1 else  A.DATA_PRECISION end DATA_PRECISION, case when A.DATA_SCALE is null then -1 else  A.DATA_SCALE end DATA_SCALE,  case when A.NULLABLE ='Y' THEN 'True' ELSE 'False' END as isnull, B.COMMENTS,A.DATA_DEFAULT,case when a.AVG_COL_LEN is null then -1 else a.AVG_COL_LEN end AVG_COL_LEN
+    # source_db = cx_Oracle.connect(ora_conn)  # ljd 这行必须要加才不会hang
+    # cur_tbl_columns = source_db.cursor()
+    sql = """SELECT A.COLUMN_NAME, A.DATA_TYPE, A.DATA_LENGTH, case when A.DATA_PRECISION is null then -1 else  A.DATA_PRECISION end DATA_PRECISION, case when A.DATA_SCALE is null then -1 else  A.DATA_SCALE end DATA_SCALE,  case when A.NULLABLE ='Y' THEN 'True' ELSE 'False' END as isnull, B.COMMENTS,A.DATA_DEFAULT,case when a.AVG_COL_LEN is null then -1 else a.AVG_COL_LEN end AVG_COL_LEN
             FROM USER_TAB_COLUMNS A LEFT JOIN USER_COL_COMMENTS B 
             ON A.TABLE_NAME=B.TABLE_NAME AND A.COLUMN_NAME=B.COLUMN_NAME 
-            WHERE A.TABLE_NAME='%s' ORDER BY COLUMN_ID ASC""" % table_name)
+            WHERE A.TABLE_NAME='%s' ORDER BY COLUMN_ID ASC""" % table_name
+    output_table_col = oracle_cursor.fetch_all(sql)
     result = []
-    primary_key = table_primary(table_name)
-    for column in cur_tbl_columns:  # 按照游标行遍历字段
+    # primary_key = table_primary(table_name)
+    for column in output_table_col:  # 按照游标行遍历字段
         '''
         result.append({'column_name': column[0],
                        'type': column[1],
-                       'primary': column[0] in primary_key,
+                       'primary': column[0] ,
                        'length': column[2],
                        'precision': column[3],
                        'scale': column[4],
@@ -265,7 +488,7 @@ def tbl_columns(table_name):
             if column[2] >= 10000:
                 result.append({'fieldname': column[0],  # 如下为字段的属性值
                                'type': 'TINYTEXT',  # 列字段类型以及长度范围
-                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'primary': column[0],  # 如果有主键字段返回true，否则false
                                'default': 'null',  # 字段默认值
                                'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                'comment': column[6]
@@ -276,7 +499,7 @@ def tbl_columns(table_name):
             elif column[7] is None:  # 对Oracle字符串类型默认值为null的判断
                 result.append({'fieldname': column[0],  # 如下为字段的属性值
                                'type': 'VARCHAR' + '(' + str(column[2]) + ')',  # 列字段类型以及长度范围
-                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'primary': column[0],  # 如果有主键字段返回true，否则false
                                'default': column[7],  # 字段默认值
                                'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                'comment': column[6]
@@ -286,7 +509,7 @@ def tbl_columns(table_name):
                 7].upper() == '( \'USER\' )':  # Oracle有些字符类型默认值带有括号，这里在MySQL中去掉括号
                 result.append({'fieldname': column[0],  # 如下为字段的属性值
                                'type': 'VARCHAR' + '(' + str(column[2]) + ')',  # 列字段类型以及长度范围
-                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'primary': column[0],  # 如果有主键字段返回true，否则false
                                'default': '\'USER\'',  # 字段默认值
                                'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                'comment': column[6]
@@ -295,7 +518,7 @@ def tbl_columns(table_name):
             else:  # 其余情况的默认值，MySQL保持默认不变
                 result.append({'fieldname': column[0],  # 如下为字段的属性值
                                'type': 'VARCHAR' + '(' + str(column[2]) + ')',  # 列字段类型以及长度范围
-                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'primary': column[0],  # 如果有主键字段返回true，否则false
                                'default': column[7],  # 字段默认值
                                'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                'comment': column[6]
@@ -308,7 +531,7 @@ def tbl_columns(table_name):
             if column[7] == 'sysdate' or column[7] == '( (SYSDATE) )':
                 result.append({'fieldname': column[0],  # 如下为字段的属性值
                                'type': 'DATETIME',  # 列字段类型以及长度范围
-                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'primary': column[0],  # 如果有主键字段返回true，否则false
                                'default': 'current_timestamp()',  # 字段默认值
                                'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                'comment': column[6]
@@ -318,7 +541,7 @@ def tbl_columns(table_name):
             else:
                 result.append({'fieldname': column[0],  # 如下为字段的属性值
                                'type': 'DATETIME',  # 列字段类型以及长度范围
-                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'primary': column[0],  # 如果有主键字段返回true，否则false
                                'default': column[7],  # 字段默认值
                                'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                'comment': column[6]
@@ -333,7 +556,7 @@ def tbl_columns(table_name):
             if column[3] > 0 and column[4] > 0:
                 result.append({'fieldname': column[0],
                                'type': 'DECIMAL' + '(' + str(column[3]) + ',' + str(column[4]) + ')',  # 列字段类型以及长度范围
-                               'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                               'primary': column[0],  # 如果有主键字段返回true，否则false
                                'default': column[7],  # 字段默认值
                                'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                'comment': column[6]
@@ -346,7 +569,7 @@ def tbl_columns(table_name):
                 if column[7] is None:  # 对Oracle number字段类型默认值为null的判断
                     result.append({'fieldname': column[0],
                                    'type': 'BIGINT',  # 列字段类型以及长度范围
-                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'primary': column[0],  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
@@ -355,7 +578,7 @@ def tbl_columns(table_name):
                 elif column[7].upper().startswith('NULL'):  # 对默认值的字符串值等于'null'的做判断
                     result.append({'fieldname': column[0],
                                    'type': 'BIGINT',  # 列字段类型以及长度范围
-                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'primary': column[0],  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
@@ -364,7 +587,7 @@ def tbl_columns(table_name):
                 else:  # 其余情况通过正则只提取数字部分，即去掉原Oracle中有括号的默认值
                     result.append({'fieldname': column[0],
                                    'type': 'BIGINT',  # 列字段类型以及长度范围
-                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'primary': column[0],  # 如果有主键字段返回true，否则false
                                    'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值,正则方式仅提取数字
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
@@ -377,7 +600,7 @@ def tbl_columns(table_name):
                 if column[7] is None:  # 对Oracle number字段类型默认值为null的判断
                     result.append({'fieldname': column[0],
                                    'type': 'INT',  # 列字段类型以及长度范围
-                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'primary': column[0],  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
@@ -386,7 +609,7 @@ def tbl_columns(table_name):
                 elif column[7].upper().startswith('NULL'):  # 对默认值的字符串值等于'null'的做判断
                     result.append({'fieldname': column[0],
                                    'type': 'INT',  # 列字段类型以及长度范围
-                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'primary': column[0],  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
@@ -395,7 +618,7 @@ def tbl_columns(table_name):
                 else:  # 其余情况通过正则只提取数字部分，即去掉原Oracle中有括号的默认值
                     result.append({'fieldname': column[0],
                                    'type': 'INT',  # 列字段类型以及长度范围
-                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'primary': column[0],  # 如果有主键字段返回true，否则false
                                    'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值去掉括号，仅提取数字
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
@@ -408,7 +631,7 @@ def tbl_columns(table_name):
                 if column[7] is None:  # 对Oracle number字段类型默认值为null的判断
                     result.append({'fieldname': column[0],
                                    'type': 'BIGINT',  # 列字段类型以及长度范围
-                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'primary': column[0],  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
@@ -417,7 +640,7 @@ def tbl_columns(table_name):
                 elif column[7].upper().startswith('NULL'):  # 对默认值的字符串值等于'null'的做判断
                     result.append({'fieldname': column[0],
                                    'type': 'BIGINT',  # 列字段类型以及长度范围
-                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'primary': column[0],  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
@@ -426,7 +649,7 @@ def tbl_columns(table_name):
                 else:  # 其余情况通过正则只提取数字部分，即去掉原Oracle中有括号的默认值
                     result.append({'fieldname': column[0],
                                    'type': 'BIGINT',  # 列字段类型以及长度范围
-                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'primary': column[0],  # 如果有主键字段返回true，否则false
                                    'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值去掉括号，仅提取数字
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
@@ -439,7 +662,7 @@ def tbl_columns(table_name):
                 if column[7] is None:  # 对默认值是否为null的判断
                     result.append({'fieldname': column[0],
                                    'type': 'INT',  # 列字段类型以及长度范围
-                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'primary': column[0],  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
@@ -448,7 +671,7 @@ def tbl_columns(table_name):
                 elif column[7].upper().startswith('NULL'):  # 对数据库中默认值字符串为'null'的判断
                     result.append({'fieldname': column[0],
                                    'type': 'INT',  # 列字段类型以及长度范围
-                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'primary': column[0],  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
@@ -457,7 +680,7 @@ def tbl_columns(table_name):
                 else:  # 其余情况number字段类型正则提取默认值数字部分
                     result.append({'fieldname': column[0],
                                    'type': 'INT',  # 列字段类型以及长度范围
-                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'primary': column[0],  # 如果有主键字段返回true，否则false
                                    'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值去掉括号，仅提取数字
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
@@ -469,7 +692,7 @@ def tbl_columns(table_name):
                 if column[7] is None:  # 对默认值是否为null的判断
                     result.append({'fieldname': column[0],
                                    'type': 'BIGINT',  # 列字段类型以及长度范围
-                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'primary': column[0],  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
@@ -478,7 +701,7 @@ def tbl_columns(table_name):
                 elif column[7].upper().startswith('NULL'):  # 数据库中字段类型默认值为字符串'null'的判断
                     result.append({'fieldname': column[0],
                                    'type': 'BIGINT',  # 列字段类型以及长度范围
-                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'primary': column[0],  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
@@ -487,7 +710,7 @@ def tbl_columns(table_name):
                 else:  # 其余情况number字段类型正则提取默认值数字部分
                     result.append({'fieldname': column[0],
                                    'type': 'BIGINT',  # 列字段类型以及长度范围
-                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'primary': column[0],  # 如果有主键字段返回true，否则false
                                    'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值仅提取数字部分
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
@@ -499,7 +722,7 @@ def tbl_columns(table_name):
                 if column[7] is None:  # 对默认值是否为null的判断
                     result.append({'fieldname': column[0],
                                    'type': 'INT',  # 列字段类型以及长度范围
-                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'primary': column[0],  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
@@ -508,7 +731,7 @@ def tbl_columns(table_name):
                 elif column[7].upper().startswith('NULL'):  # 数据库中字段类型默认值为字符串'null'的判断
                     result.append({'fieldname': column[0],
                                    'type': 'INT',  # 列字段类型以及长度范围
-                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'primary': column[0],  # 如果有主键字段返回true，否则false
                                    'default': column[7],  # 字段默认值,设为原值null
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
@@ -517,7 +740,7 @@ def tbl_columns(table_name):
                 else:  # 其余情况number字段类型正则提取默认值数字部分
                     result.append({'fieldname': column[0],
                                    'type': 'INT',  # 列字段类型以及长度范围
-                                   'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                                   'primary': column[0],  # 如果有主键字段返回true，否则false
                                    'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值，仅提取数字部分
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
@@ -527,7 +750,7 @@ def tbl_columns(table_name):
         elif column[1] == 'CLOB' or column[1] == 'NCLOB' or column[1] == 'LONG':
             result.append({'fieldname': column[0],  # 如下为字段的属性值
                            'type': 'LONGTEXT',  # 列字段类型以及长度范围
-                           'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                           'primary': column[0],  # 如果有主键字段返回true，否则false
                            'default': column[7],  # 字段默认值
                            'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                            'comment': column[6]
@@ -537,7 +760,7 @@ def tbl_columns(table_name):
         elif column[1] == 'BLOB' or column[1] == 'RAW' or column[1] == 'LONG RAW':
             result.append({'fieldname': column[0],  # 如下为字段的属性值
                            'type': 'LONGBLOB',  # 列字段类型以及长度范围
-                           'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                           'primary': column[0],  # 如果有主键字段返回true，否则false
                            'default': column[7],  # 字段默认值
                            'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                            'comment': column[6]
@@ -546,7 +769,7 @@ def tbl_columns(table_name):
         else:
             result.append({'fieldname': column[0],  # 如果是非大字段类型，通过括号加上字段类型长度范围
                            'type': column[1] + '(' + str(column[2]) + ')',  # 列字段类型以及长度范围
-                           'primary': column[0] in primary_key,  # 如果有主键字段返回true，否则false
+                           'primary': column[0],  # 如果有主键字段返回true，否则false
                            'default': column[7],  # 字段默认值
                            'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                            'comment': column[6]
@@ -555,7 +778,7 @@ def tbl_columns(table_name):
                           )
     # print('列属性：\n')
     # print(result)
-    cur_tbl_columns.close()
+    # cur_tbl_columns.close()
     return result
 
 
@@ -565,8 +788,9 @@ def create_table(table_name):
     logging.basicConfig(filename='/tmp/ddl_failed_table.log')
     # 在MySQL创建表前先删除存在的表
     drop_target_table = 'drop table if exists ' + table_name
-    lock.acquire()  # 并行执行加锁
-    cur_drop_table.execute(drop_target_table)
+    # lock.acquire()  # 并行执行加锁
+    mysql_cursor.execute(drop_target_table)
+    # cur_drop_table.execute(drop_target_table)
     fieldinfos = []
     structs = tbl_columns(table_name)  # 获取源表的表字段信息
     # v_pri_key = table_primary(table_name)  # 获取源表的主键字段，因为已经有创建约束的sql，这里可以不用执行
@@ -593,7 +817,8 @@ def create_table(table_name):
     print('\n创建表:' + table_name + '\n')
     print(create_table_sql)
     try:
-        cur_createtbl.execute(create_table_sql)
+        # cur_createtbl.execute(create_table_sql)
+        mysql_cursor.execute(create_table_sql)
         #  if v_pri_key: 因为已经有创建约束的sql，这里可以不用执行
         #    cur_createtbl.execute(add_pri_key_sql) 因为已经有创建约束的sql，这里可以不用执行
         print(table_name + '表创建完毕', time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), '\n')
@@ -617,7 +842,7 @@ def create_table(table_name):
         ddl_create_error_table = traceback.format_exc()
         logging.error(ddl_create_error_table)  # ddl创建失败的sql语句输出到文件/tmp/ddl_failed_table.log
         print('表' + table_name + '创建失败请检查ddl语句!\n')
-    lock.release()
+    # lock.release()
 
 
 # 用来创建目标索引的函数
@@ -903,6 +1128,11 @@ def create_comment():
 
 # 仅输出Oracle当前用户的表，即user_tables的table_name
 def print_table():
+    tableoutput_sql = 'select table_name from user_tables  order by table_name  desc'  # 查询需要导出的表
+    cur_tblprt.execute(tableoutput_sql)
+    for v_table in cur_tblprt:
+        list_table_name.append(v_table[0])
+    '''    
     cur_tblprt = source_db.cursor()  # 生成用于输出表名的游标对象
     #   where table_name in (\'TEST4\',\'TEST3\',\'TEST2\')
     tableoutput_sql = 'select table_name from user_tables  order by table_name  desc'  # 查询需要导出的表
@@ -913,6 +1143,7 @@ def print_table():
         table_name = row_table[0]
         f.write(table_name + '\n')
     f.close()
+    '''
 
 
 # 打印输出DDL创建失败的sql语句
@@ -942,12 +1173,15 @@ def print_insert_failed_table(table_name):
 
 # 批量将Oracle数据插入到MySQL的方法
 def mig_table(tablename):
+    mysql_conn = MySQLPOOL.connection()  # MySQL连接池
+    mysql_cursor = mysql_conn.cursor()
     target_table = source_table = tablename
     if source_db_type.upper() == 'ORACLE':
         get_column_length = 'select count(*) from user_tab_columns where table_name= ' + "'" + source_table.upper() + "'"  # 拼接获取源表有多少个列的SQL
-    lock.acquire()
-    cur_select.execute(get_column_length)  # 执行
-    col_len = cur_select.fetchone()  # 获取源表有多少个列
+    # lock.acquire()
+    # cur_select.execute(get_column_length)  # 执行
+    oracle_cursor.execute(get_column_length)
+    col_len = oracle_cursor.fetchone()  # 获取源表有多少个列
     col_len = col_len[0]  # 将游标结果数组的值赋值，该值为表列字段总数
     val_str = ''  # 用于生成批量插入的列字段变量
     if target_db_type.upper() == 'MYSQL':
@@ -971,8 +1205,10 @@ def mig_table(tablename):
                 5000))  # 每次获取2000行，cur_oracle_result.arraysize值决定，MySQL fetchmany 返回的是 tuple 数据类型 所以用list做类型转换
         #  print(cur_oracle_result.description)  # 打印Oracle查询结果集字段列表以及类型
         try:
-            cur_insert_mysql.executemany(insert_sql, rows)  # 批量插入每次5000行，需要注意的是 rows 必须是 list [] 数据类型
-            target_db.commit()  # 提交
+            # cur_insert_mysql.executemany(insert_sql, rows)  # 批量插入每次5000行，需要注意的是 rows 必须是 list [] 数据类型
+            mysql_cursor.executemany(insert_sql, rows)
+            mysql_conn.commit()
+            # target_db.commit()  # 提交
         except Exception as e:
             print(traceback.format_exc())  # 遇到异常记录到log，会继续迁移下张表
             #  print(tablename, '表记录', rows, '插入失败') 插入失败时输出insert语句
@@ -988,30 +1224,30 @@ def mig_table(tablename):
         if not rows:
             break  # 当前表游标获取不到数据之后中断循环，返回到mig_database，可以继续下个表
         source_effectrow = cur_oracle_result.rowcount  # 计数源表插入的行数
-        target_effectrow = target_effectrow + cur_insert_mysql.rowcount  # 计数目标表插入的行数
+        target_effectrow = target_effectrow + mysql_cursor.rowcount  # 计数目标表插入的行数
     print('源表查询总数:', source_effectrow)
     print('目标插入总数:', target_effectrow)
     print('插入完成')
     print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
     print('\n\n')
-    lock.release()
+    # lock.release()
 
 
 # 在MySQL创建表结构以及添加主键
 def create_meta_table():
-    cur_tblprt = source_db.cursor()  # 生成用于输出表名的游标对象
     tableoutput_sql = 'select table_name from user_tables  order by table_name  desc'  # 查询需要导出的表
     cur_tblprt.execute(tableoutput_sql)
-    for v_table in cur_tblprt:
-        list_table_name.append(v_table[0])
-    # print(list_table_name)
-    print('-' * 50 + '开始创建表' + '-' * 50)
-    # 在for里使用并行方式创建表
-    pool = ThreadPool()
-    pool.map(create_table, list_table_name)
-    pool.close()
-    pool.join()
+    output_table_name = oracle_cursor.fetch_all(tableoutput_sql)
+    starttime = datetime.datetime.now()
+    for row in output_table_name:
+        tbl_name = row[0]
+        print('#' * 50 + '开始创建表' + tbl_name + '#' * 50)
+        print(tbl_name + '\n')
+        create_table(tbl_name)  # 调用Oracle映射到MySQL规则的函数
     print('\033[31m*' * 50 + '表创建完成' + '*' * 50 + '\033[0m\n\n\n')
+    endtime = datetime.datetime.now()
+    print("表创建耗时\n" + "开始时间:" + str(starttime) + '\n' + "结束时间:" + str(endtime) + '\n' + "消耗时间:" + str(
+        (endtime - starttime).seconds) + "秒\n")
     '''
     # 以下为串行方式创建表
     filename = '/tmp/table_name.csv'  # 从user_tables输出的表
@@ -1030,15 +1266,6 @@ def create_meta_table():
 
 # 从csv文件读取源库需要迁移的表，调用mig_table(tbl_name, 1)，插入表数据，并输出迁移失败的表
 def mig_database():
-    print('-' * 50 + '开始表数据迁移' + '-' * 50)
-    # 并行迁移数据
-    pool = ThreadPool()
-    pool.map(mig_table, list_success_table)
-    pool.close()
-    pool.join()
-    print('\033[31m*' * 50 + '表数据迁移完成' + '*' * 50 + '\033[0m\n\n\n')
-    '''
-    # 以下为串行迁移表
     filename = '/tmp/ddl_success_table.log'  # 读取要迁移的表，csv文件 list_table_name
     print('-' * 50 + '开始表数据迁移' + '-' * 50)
     with open(filename) as f:
@@ -1052,6 +1279,72 @@ def mig_database():
             print(tbl_name + '数据插入完毕', time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), '\n')
         print('\033[31m*' * 50 + '表数据迁移完成' + '*' * 50 + '\033[0m\n\n\n')
     f.close()
+
+
+def task1(name):
+    print(name)
+    task1_starttime = datetime.datetime.now()
+    for v_table_name in new_list[0][int(name)]:
+        table_name = v_table_name
+        print('#' * 50 + '开始创建表' + table_name + '#' * 50)
+        print(table_name + '\n')
+        create_table(table_name)  # 调用Oracle映射到MySQL规则的函数
+    print('\033[31m*' * 50 + '表创建完成' + '*' * 50 + '\033[0m\n\n\n')
+    task1_endtime = datetime.datetime.now()
+    task1_exec_time = str((task1_endtime - task1_starttime).seconds)
+    # list_task1_time.append(str(task1_endtime))
+    # list_task1_time.append(str(task1_exec_time))
+    # time.sleep(0.5)
+    print("第一部分的表\n" + "开始时间:" + str(task1_starttime) + '\n' + "结束时间:" + str(
+        task1_endtime) + '\n' + "消耗时间:" + task1_exec_time + "秒\n")
+
+
+def task2(name):
+    print(name)
+    task2_starttime = datetime.datetime.now()
+    for v_table_name in new_list[0][int(name)]:
+        table_name = v_table_name
+        print('#' * 50 + '开始创建表' + table_name + '#' * 50)
+        print(table_name + '\n')
+        create_table(table_name)  # 调用Oracle映射到MySQL规则的函数
+    print('\033[31m*' * 50 + '表创建完成' + '*' * 50 + '\033[0m\n\n\n')
+    task2_endtime = datetime.datetime.now()
+    task2_exec_time = str((task2_endtime - task2_starttime).seconds)
+    # time.sleep(0.5)
+    print("第二部分的表\n" + "开始时间:" + str(task2_starttime) + '\n' + "结束时间:" + str(
+        task2_endtime) + '\n' + "消耗时间:" + task2_exec_time + "秒\n")
+
+
+def main_process():
+    p_starttime = datetime.datetime.now()
+    p_pro = []
+    # 批量调
+    for i in range(2):  # 下面先生成多进程执行的动态变量以及把进程加到list，加到list后统一调用进程开始run
+        exec('p{} = Process(target=task{}, args=({},))'.format(i, i + 1, i))
+        exec('p_pro.append(p{})'.format(i))
+        # exec('p{}.start()'.format(i))
+    for p_t in p_pro:  # 这里对list中存在的进程统一开始调用
+        p_t.start()
+    for p_t in p_pro:
+        p_t.join()
+    # 批量调
+    '''
+    # 直接调
+    p1 = Process(target=task1, args=('0',))
+    p1.start()
+    p2 = Process(target=task2, args=('1',))
+    p2.start()
+    # 直接调
+    '''
+    time.sleep(0.1)
+    p_endtime = datetime.datetime.now()
+    print('多进程开始时间：', p_starttime, '多进程结束时间：', p_endtime, '执行时间：', str((p_endtime - p_starttime).seconds), 'seconds')
+    time.sleep(0.1)
+    '''
+    t1 = Thread(target=task1)
+    t2 = Thread(target=task2)
+    t1.start()
+    t2.start()
     '''
 
 
@@ -1159,8 +1452,10 @@ if __name__ == '__main__':
     path = '/tmp/ddl_failed_table.log'  # 创建失败的ddl日志文件
     if os.path.exists(path):  # 如果文件存在，每次迁移表前先清除失败的表csv文件
         os.remove(path)  # 删除文件
-    print_table()  # 1、读取user_tables,生成Oracle要迁移的表写入到csv文件
+    split_list()  # 把表分成2个list
+    # print_table()  # 1、读取user_tables,生成Oracle要迁移的表写入到csv文件，现在不用了
     create_meta_table()  # 2、创建表结构
+    # main_process()  # 并行创建表
     create_meta_constraint()  # 3、创建约束
     create_meta_foreignkey()  # 4、创建外键
     mig_database()  # 5、迁移数据 (只迁移DDL创建成功的表)
