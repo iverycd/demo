@@ -2,9 +2,14 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.3.9.2
+# V1.4
 """
 MODIFY HISTORY
+****************************************************
+V1.4
+2020.11.13
+1、异步任务修复
+2、其他修正
 ****************************************************
 V1.3.9.2
 2020.11.12
@@ -129,7 +134,8 @@ import logging
 from threading import Thread
 from multiprocessing import Process  # 下面用了动态变量执行多进程，所以这里是灰色
 from dbutils.pooled_db import PooledDB
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED, FIRST_COMPLETED
+import concurrent
 
 MySQLPOOL = PooledDB(
     creator=pymysql,  # 使用链接数据库的模块
@@ -311,7 +317,7 @@ class OraclePool:
 # NJJBXQ_DJGBZ
 
 config = {
-    'user': 'DATATEST',
+    'user': 'datatest',
     'password': 'oracle',
     'host': '172.16.4.81',
     'port': 1521,
@@ -347,7 +353,7 @@ new_list = []  # 用于存储1分为2的表，将原表分成2个list
 sys.stdout = Logger(stream=sys.stdout)
 os.environ['NLS_LANG'] = 'SIMPLIFIED CHINESE_CHINA.UTF8'  # 设置字符集为UTF8，防止中文乱码
 # ora_conn = 'test2/oracle@192.168.189.208:1522/orcl11g'  # test2
-ora_conn = 'DATATEST/oracle@172.16.4.81/orcl'  # NJJBXQ_DJGBZ
+ora_conn = 'datatest/oracle@172.16.4.81/orcl'  # NJJBXQ_DJGBZ
 mysql_conn = '172.16.4.81'
 mysql_target_db = 'test'
 source_db = cx_Oracle.connect(ora_conn)  # 源库Oracle的数据库连接
@@ -362,19 +368,19 @@ cur_createtbl = target_db.cursor()
 cur_drop_table = target_db.cursor()  # 在MySQL清除表 drop table if exists
 cur_source_constraint = source_db.cursor()
 cur_target_constraint = target_db.cursor()
-cur_oracle_result.arraysize = 10000  # Oracle数据库游标对象结果集返回的行数即每次获取多少行
-cur_insert_mysql.arraysize = 10000  # MySQL数据库批量插入的行数
+cur_oracle_result.arraysize = 20000  # Oracle数据库游标对象结果集返回的行数即每次获取多少行
+cur_insert_mysql.arraysize = 20000  # MySQL数据库批量插入的行数
 # 以下为异步迁移数据单独创建了连接
 source_db2 = cx_Oracle.connect(ora_conn)  # 源库Oracle的数据库连接
 cur_select2 = source_db2.cursor()  # 源库Oracle查询源表有几列
 cur_oracle_result2 = source_db2.cursor()  # 查询Oracle源表的游标结果集
-cur_oracle_result2.arraysize = 10000
+cur_oracle_result2.arraysize = 20000
 target_db1 = pymysql.connect(mysql_conn, "root", "Gepoint", mysql_target_db)  # 目标库MySQL的数据库连接
 target_db2 = pymysql.connect(mysql_conn, "root", "Gepoint", mysql_target_db)  # 目标库MySQL的数据库连接
 cur_insert_mysql1 = target_db1.cursor()  # 目标库MySQL插入目标表执行的插入sql
 cur_insert_mysql2 = target_db2.cursor()  # 目标库MySQL插入目标表执行的插入sql
-cur_insert_mysql1.arraysize = 10000
-cur_insert_mysql2.arraysize = 10000
+cur_insert_mysql1.arraysize = 20000
+cur_insert_mysql2.arraysize = 20000
 
 
 # clob、blob、nclob要在读取源表前加载outputtypehandler属性,即将Oracle大字段转为string类型
@@ -420,6 +426,7 @@ autocol_failed_count = []
 # source_table = input("请输入源表名称:")    # 手动从键盘获取源表名称
 # target_table = input("请输入目标表名称:")  # 手动从键盘获取目标表名称
 
+# 下面的是自定义切片
 def list_of_groups(init_list, children_list_len):
     list_of_groups = zip(*(iter(init_list),) * children_list_len)
     end_list = [list(i) for i in list_of_groups]
@@ -438,14 +445,63 @@ def split_list():  # 将user_tables的list结果分为2个小list
     print('一分为二：', new_list)
 
 
-def split_success_list():  # 将创建表成功的list结果分为2个小list
-    print_table()
-    n = round(len(list_success_table) / 2)
-    # n = 242
-    print(n)
+# 对list平均分，可以一分为二
+def bisector_list(tabulation: list, num: int):
+    """
+    将列表平均分成几份
+    :param tabulation: 列表
+    :param num: 份数
+    :return: 返回一个新的列表
+    """
+    new_list = []
+
+    '''列表长度大于等于份数'''
+    if len(tabulation) >= num:
+        '''remainder:列表长度除以份数，取余'''
+        remainder = len(tabulation) % num
+        if remainder == 0:
+            '''merchant:列表长度除以分数'''
+            merchant = int(len(tabulation) / num)
+            '''将列表平均拆分'''
+            for i in range(1, num + 1):
+                if i == 1:
+                    new_list.append(tabulation[:merchant])
+                else:
+                    new_list.append(tabulation[(i - 1) * merchant:i * merchant])
+            return new_list
+        else:
+            '''merchant：列表长度除以分数 取商'''
+            merchant = int(len(tabulation) // num)
+            '''remainder:列表长度除以份数，取余'''
+            remainder = int(len(tabulation) % num)
+            '''将列表平均拆分'''
+            for i in range(1, num + 1):
+                if i == 1:
+                    new_list.append(tabulation[:merchant])
+                else:
+                    new_list.append(tabulation[(i - 1) * merchant:i * merchant])
+                    '''将剩余数据的添加前面列表中'''
+                    if int(len(tabulation) - i * merchant) <= merchant:
+                        for j in tabulation[-remainder:]:
+                            new_list[tabulation[-remainder:].index(j)].append(j)
+            return new_list
+    else:
+        '''如果列表长度小于份数'''
+        for i in range(1, len(tabulation) + 1):
+            tabulation_subset = []
+            tabulation_subset.append(tabulation[i - 1])
+            new_list.append(tabulation_subset)
+        return new_list
+
+
+def split_success_list():  # 将创建表成功的list结果分为2个小list,平均分
+    # n = round(len(list_success_table) / 2)
+    n = 2  # 平均分成2份list
+    print('切片的大小:', n)
     print('原始list：', list_success_table, '\n')
-    new_list.append(list_of_groups(list_success_table, n))
+    new_list.append(bisector_list(list_success_table, n))
     print('一分为二：', new_list)
+    print('新的list长度：', len(new_list[0]))  # 分了几个片，如果一分为二就是2，如过分片不足就是1
 
 
 # 打印连接信息
@@ -982,6 +1038,11 @@ def create_meta_foreignkey():
 
 # 调用user_constraint函数批量创建主键以及索引
 def create_meta_constraint():
+    print('#' * 50 + '开始创建' + '约束以及索引 ' + '#' * 50)
+    print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+    user_constraint()  # 现在改为了一次性创建约束以及索引
+    print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+    print('\033[31m*' * 50 + '主键约束、索引创建完成' + '*' * 50 + '\033[0m\n\n\n')
     #  将创建失败的sql记录到log文件
     # logging.basicConfig(filename='/tmp/constraint_failed_table.log')
     """
@@ -996,11 +1057,6 @@ def create_meta_constraint():
         print('\033[31m*' * 50 + '主键约束、索引创建完成' + '*' * 50 + '\033[0m\n\n\n')
     f.close()
     """
-    print('#' * 50 + '开始创建' + '约束以及索引 ' + '#' * 50)
-    print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
-    user_constraint()  # 现在改为了一次性创建约束以及索引
-    print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
-    print('\033[31m*' * 50 + '主键约束、索引创建完成' + '*' * 50 + '\033[0m\n\n\n')
 
 
 # 查找具有自增特性的表以及字段名称
@@ -1269,7 +1325,7 @@ def mig_table(tablename):
 
 
 # 在MySQL创建表结构以及添加主键
-def create_meta_table():
+def create_meta_table():  # 调用create_table函数来创建表的
     tableoutput_sql = 'select table_name from user_tables  order by table_name  desc'  # 查询需要导出的表
     # cur_tblprt.execute(tableoutput_sql)
     output_table_name = oracle_cursor.fetch_all(tableoutput_sql)
@@ -1284,7 +1340,7 @@ def create_meta_table():
     print("表创建耗时\n" + "开始时间:" + str(starttime) + '\n' + "结束时间:" + str(endtime) + '\n' + "消耗时间:" + str(
         (endtime - starttime).seconds) + "秒\n")
     '''
-    # 以下为串行方式创建表
+    # 之前将表存在了csv文件，现在不用了
     filename = '/tmp/table_name.csv'  # 从user_tables输出的表
     with open(filename) as f:
         reader = csv.reader(f)
@@ -1314,40 +1370,6 @@ def mig_database():
             print(tbl_name + '数据插入完毕', time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()), '\n')
         print('\033[31m*' * 50 + '表数据迁移完成' + '*' * 50 + '\033[0m\n\n\n')
     f.close()
-
-
-def create_table_task1(name):
-    print(name)
-    task1_starttime = datetime.datetime.now()
-    for v_table_name in new_list[0][int(name)]:
-        table_name = v_table_name
-        print('#' * 50 + '开始创建表' + table_name + '#' * 50)
-        print('task1 ' + table_name + '\n')
-        create_table(table_name)  # 调用Oracle映射到MySQL规则的函数
-    print('\033[31m*' * 50 + '表创建完成' + '*' * 50 + '\033[0m\n\n\n')
-    task1_endtime = datetime.datetime.now()
-    task1_exec_time = str((task1_endtime - task1_starttime).seconds)
-    # list_task1_time.append(str(task1_endtime))
-    # list_task1_time.append(str(task1_exec_time))
-    # time.sleep(0.5)
-    print("第一部分的表\n" + "开始时间:" + str(task1_starttime) + '\n' + "结束时间:" + str(
-        task1_endtime) + '\n' + "消耗时间:" + task1_exec_time + "秒\n")
-
-
-def create_table_task2(name):
-    print(name)
-    task2_starttime = datetime.datetime.now()
-    for v_table_name in new_list[0][int(name)]:
-        table_name = v_table_name
-        print('#' * 50 + '开始创建表' + table_name + '#' * 50)
-        print('task2 ' + table_name + '\n')
-        create_table(table_name)  # 调用Oracle映射到MySQL规则的函数
-    print('\033[31m*' * 50 + '表创建完成' + '*' * 50 + '\033[0m\n\n\n')
-    task2_endtime = datetime.datetime.now()
-    task2_exec_time = str((task2_endtime - task2_starttime).seconds)
-    # time.sleep(0.5)
-    print("第二部分的表\n" + "开始时间:" + str(task2_starttime) + '\n' + "结束时间:" + str(
-        task2_endtime) + '\n' + "消耗时间:" + task2_exec_time + "秒\n")
 
 
 def create_table_main_process():
@@ -1383,11 +1405,88 @@ def create_table_main_process():
     '''
 
 
+def mig_table_task(list_index):
+    time.sleep(0.1)  # 错开屏幕打印信息
+    task1_starttime = datetime.datetime.now()
+    for v_table_name in new_list[0][int(list_index)]:
+        table_name = v_table_name
+        print('#' * 50 + '开始迁移表' + table_name + '#' * 50)
+        print('task' + str(list_index) + ' \n')
+        target_table = source_table = table_name
+        if source_db_type.upper() == 'ORACLE':
+            get_column_length = 'select count(*) from user_tab_columns where table_name= ' + "'" + source_table.upper() + "'"  # 拼接获取源表有多少个列的SQL
+        cur_select.execute(get_column_length)  # 执行
+        col_len = cur_select.fetchone()
+        # col_len = oracle_cursor.fetch_one(get_column_length)  # 获取源表有多少个列
+        col_len = col_len[0]  # 将游标结果数组的值赋值，该值为表列字段总数
+        val_str = ''  # 用于生成批量插入的列字段变量
+        if target_db_type.upper() == 'MYSQL':
+            for i in range(1, col_len):
+                val_str = val_str + '%s' + ','
+            val_str = val_str + '%s'  # MySQL批量插入语法是 insert into tb_name values(%s,%s,%s,%s)
+        elif target_db_type.upper() == 'ORACLE':
+            for i in range(1, col_len):
+                val_str = val_str + ':' + str(i) + ','
+            val_str = val_str + ':' + str(col_len)  # Oracle批量插入语法是 insert into tb_name values(:1,:2,:3)
+        insert_sql = 'insert into ' + target_table + ' values(' + val_str + ')'  # 拼接insert into 目标表 values  #目标表插入语句
+        select_sql = 'select * from ' + source_table  # 源查询SQL，如果有where过滤条件，在这里拼接
+        try:
+            cur_oracle_result.execute(select_sql)  # 执行
+        except Exception:
+            print('查询Oracle源表失败，请检查连接！\n\n')
+            break
+        print("\033[31m正在执行插入表:\033[0m", table_name)
+        print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+        source_effectrow = 0
+        target_effectrow = 0
+        while True:
+            rows = list(cur_oracle_result.fetchmany(
+                20000))  # 每次获取2000行，cur_oracle_result.arraysize值决定，MySQL fetchmany 返回的是 tuple 数据类型 所以用list做类型转换
+            #  print(cur_oracle_result.description)  # 打印Oracle查询结果集字段列表以及类型
+            try:
+                cur_insert_mysql1.executemany(insert_sql, rows)  # 批量插入每次5000行，需要注意的是 rows 必须是 list [] 数据类型
+                # mysql_cursor.executemany(insert_sql, rows)
+                # mysql_conn.commit() 对于连接池，这里需要显式提交
+                target_db1.commit()  # 提交
+            except Exception as e:
+                time.sleep(0.1)
+                print(traceback.format_exc())  # 遇到异常记录到log，会继续迁移下张表
+                sql_insert_error1 = traceback.format_exc()
+                #  print(tablename, '表记录', rows, '插入失败') 插入失败时输出insert语句
+                # print_insert_failed_table(table_name)
+                filename = '/tmp/insert_failed_table.log'
+                f = open(filename, 'a', encoding='utf-8')
+                f.write('/' + '*' * 50 + table_name + ' INSERT ERROR' + '*' * 50 + '/\n')
+                f.write(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()) + '\n\n')
+                f.write(insert_sql + '\n\n\n')
+                f.write(sql_insert_error1 + '\n\n')
+                f.close()
+                logging.error(sql_insert_error1)  # 插入失败的sql语句输出到文件/tmp/ddl_failed_table.log
+
+            if not rows:
+                break  # 当前表游标获取不到数据之后中断循环，返回到mig_database，可以继续下个表
+            source_effectrow = cur_oracle_result.rowcount  # 计数源表插入的行数
+            target_effectrow = target_effectrow + cur_insert_mysql1.rowcount  # 计数目标表插入的行数
+        print('源表查询总数:', source_effectrow)
+        print('目标插入总数:', target_effectrow)
+        print('插入完成')
+        print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+        print('\n\n')
+    print('\033[31m*' * 50 + '第' + str(list_index) + '部分表迁移完成' + '*' * 50 + '\033[0m\n\n\n')
+    task1_endtime = datetime.datetime.now()
+    task1_exec_time = str((task1_endtime - task1_starttime).seconds)
+    print("第" + str(list_index) + "部分的表\n" + "开始时间:" + str(task1_starttime) + '\n' + "结束时间:" + str(
+        task1_endtime) + '\n' + "消耗时间:" + task1_exec_time + "秒\n")
+
+
+'''
 def mig_table_task1(list_index):
     time.sleep(0.1)
     # source_db = cx_Oracle.connect(ora_conn)
     # cur_oracle_result = source_db.cursor
     # cur_select = source_db.cursor
+    # target_db1 = pymysql.connect(mysql_conn, "root", "Gepoint", mysql_target_db)
+    # cur_insert_mysql1 = target_db1.cursor
     # print(list_index)
     task1_starttime = datetime.datetime.now()
     for v_table_name in new_list[0][int(list_index)]:
@@ -1427,7 +1526,7 @@ def mig_table_task1(list_index):
         target_effectrow = 0
         while True:
             rows = list(cur_oracle_result.fetchmany(
-                10000))  # 每次获取2000行，cur_oracle_result.arraysize值决定，MySQL fetchmany 返回的是 tuple 数据类型 所以用list做类型转换
+                20000))  # 每次获取2000行，cur_oracle_result.arraysize值决定，MySQL fetchmany 返回的是 tuple 数据类型 所以用list做类型转换
             #  print(cur_oracle_result.description)  # 打印Oracle查询结果集字段列表以及类型
             try:
                 cur_insert_mysql1.executemany(insert_sql, rows)  # 批量插入每次5000行，需要注意的是 rows 必须是 list [] 数据类型
@@ -1436,8 +1535,8 @@ def mig_table_task1(list_index):
                 target_db1.commit()  # 提交
             except Exception as e:
                 time.sleep(0.1)
-                # 1print(traceback.format_exc())  # 遇到异常记录到log，会继续迁移下张表
-                # 1sql_insert_error1 = traceback.format_exc()
+                print(traceback.format_exc())  # 遇到异常记录到log，会继续迁移下张表
+                sql_insert_error1 = traceback.format_exc()
                 #  print(tablename, '表记录', rows, '插入失败') 插入失败时输出insert语句
                 # print_insert_failed_table(table_name)
                 filename = '/tmp/insert_failed_table.log'
@@ -1445,9 +1544,9 @@ def mig_table_task1(list_index):
                 f.write('/' + '*' * 50 + table_name + ' INSERT ERROR' + '*' * 50 + '/\n')
                 f.write(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()) + '\n\n')
                 f.write(insert_sql + '\n\n\n')
-                f.write('sql_insert_error1' + '\n\n')
+                f.write(sql_insert_error1 + '\n\n')
                 f.close()
-                #v1logging.error(sql_insert_error1)  # 插入失败的sql语句输出到文件/tmp/ddl_failed_table.log
+                logging.error(sql_insert_error1)  # 插入失败的sql语句输出到文件/tmp/ddl_failed_table.log
 
             if not rows:
                 break  # 当前表游标获取不到数据之后中断循环，返回到mig_database，可以继续下个表
@@ -1503,7 +1602,7 @@ def mig_table_task2(list_index):
         target_effectrow = 0
         while True:
             rows = list(cur_oracle_result2.fetchmany(
-                10000))  # 每次获取2000行，cur_oracle_result.arraysize值决定，MySQL fetchmany 返回的是 tuple 数据类型 所以用list做类型转换
+                20000))  # 每次获取2000行，cur_oracle_result.arraysize值决定，MySQL fetchmany 返回的是 tuple 数据类型 所以用list做类型转换
             #  print(cur_oracle_result.description)  # 打印Oracle查询结果集字段列表以及类型
             try:
                 cur_insert_mysql2.executemany(insert_sql, rows)  # 批量插入每次5000行，需要注意的是 rows 必须是 list [] 数据类型
@@ -1512,8 +1611,8 @@ def mig_table_task2(list_index):
                 target_db2.commit()  # 提交
             except Exception as e:
                 time.sleep(0.2)
-                # 1print(traceback.format_exc())  # 遇到异常记录到log，会继续迁移下张表
-                # 1sql_insert_error2 = traceback.format_exc()
+                print(traceback.format_exc())  # 遇到异常记录到log，会继续迁移下张表
+                sql_insert_error2 = traceback.format_exc()
                 #  print(tablename, '表记录', rows, '插入失败') 插入失败时输出insert语句
                 # print_insert_failed_table(table_name)
                 filename = '/tmp/insert_failed_table.log'
@@ -1521,9 +1620,9 @@ def mig_table_task2(list_index):
                 f.write('/' + '*' * 50 + table_name + ' INSERT ERROR' + '*' * 50 + '/\n')
                 f.write(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()) + '\n\n')
                 f.write(insert_sql + '\n\n\n')
-                f.write('sql_insert_error2' + '\n\n')
+                f.write(sql_insert_error2 + '\n\n')
                 f.close()
-                # 1logging.error(sql_insert_error2)  # 插入失败的sql语句输出到文件/tmp/ddl_failed_table.log
+                logging.error(sql_insert_error2)  # 插入失败的sql语句输出到文件/tmp/ddl_failed_table.log
 
             if not rows:
                 break  # 当前表游标获取不到数据之后中断循环，返回到mig_database，可以继续下个表
@@ -1540,6 +1639,26 @@ def mig_table_task2(list_index):
     # time.sleep(0.5)
     print("第二部分的表\n" + "开始时间:" + str(task2_starttime) + '\n' + "结束时间:" + str(
         task2_endtime) + '\n' + "消耗时间:" + task2_exec_time + "秒\n")
+'''
+
+
+def async_work():  # 异步不阻塞方式同时插入表
+    index = ['0']  # 第一个任务序列
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        task = {executor.submit(mig_table_task, v_index): v_index for v_index in index}
+        for future in concurrent.futures.as_completed(task):
+            task_name = task[future]
+            try:
+                data = future.done()
+            except Exception as exc:
+                print('%r generated an exception: %s' % (task_name, exc))
+            else:
+                print('async job done:' + str(data))
+                print('async work completed!\n\n\n')
+    if len(new_list[0]) == 2:  # 值为2说明表已经一分为二，如果不为2，说明只有1张表，就不用再去执行第二个任务
+        mig_table_task('1')  # 第二个任务序列
+    else:
+        print('source table:1\n\n')
 
 
 def mig_table_main_process():
@@ -1709,13 +1828,14 @@ if __name__ == '__main__':
     create_meta_constraint()  # 3、创建约束
     create_meta_foreignkey()  # 4、创建外键
     # mig_database()  # 5、迁移数据 (只迁移DDL创建成功的表) 串行
-    t = ThreadPoolExecutor(max_workers=2)  # 异步方式迁移数据
-    task1 = t.submit(mig_table_task1, '0')  # 此行下面的函数会以异步方式进行
-    mig_table_task2('1')
-    if task1.done():
-        print('表数据迁移完毕！\n\n')
-    else:
-        print('表数据迁移异常，请检查日志！\n\n')
+    async_work()
+    # t = ThreadPoolExecutor(max_workers=2)  # 异步方式迁移数据
+    # task1 = t.submit(mig_table_task1, '0')  # 此行下面的函数会以异步方式进行
+    # mig_table_task2('1')
+    # if task1.done():
+    #    print('表数据迁移完毕！\n\n')
+    # else:
+    #    print('表数据迁移异常，请检查日志！\n\n')
     # mig_table_main_thread()  # 并行迁移数据
     # mig_table_task1('0') # 单独执行迁移数据第一部分
     # mig_table_task2('1') # 单独执行迁移数据第二部分
