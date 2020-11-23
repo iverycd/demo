@@ -2,9 +2,14 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.4
+# V1.4.1
 """
 MODIFY HISTORY
+****************************************************
+V1.4.1
+2020.11.23
+1、修改大部分oracle游标对象由连接改为连接池
+2、其他测试
 ****************************************************
 V1.4
 2020.11.13
@@ -146,7 +151,7 @@ MySQLPOOL = PooledDB(
     # 链接池中最多共享的链接数量，0和None表示全部共享。PS: 无用，因为pymysql和MySQLdb等模块的 threadsafety都为1，所有值无论设置为多少，_maxcached永远为0，所以永远是所有链接都共享。
     blocking=True,  # 连接池中如果没有可用连接后，是否阻塞等待。True，等待；False，不等待然后报错
     maxusage=None,  # 一个链接最多被重复使用的次数，None表示无限制
-    setsession=['SET AUTOCOMMIT=1;'],  # 开始会话前执行的命令列表。
+    # setsession=['SET AUTOCOMMIT=1;'],  # 开始会话前执行的命令列表。
     ping=0,
     # ping MySQL服务端，检查是否服务可用。
     host='172.16.4.81',
@@ -282,19 +287,17 @@ class OraclePool:
 
         return result
 
-    def fetch_many(self, sql, args=None):
-        conn = self.__pool.connection()
-        cur = conn.cursor()
-        try:
-            cur.execute(sql, args)
-            while True:
-                row = cur.fetchone()
-                if row is None:
-                    break
-                # 在此编写你想做的操作
-                return row
-        except Exception as e:
-            print('异常信息:' + str(e))
+    def fetch_many(self, sql, size=None):  # NO USE
+        """Fetch several rows"""
+        conn, cursor = self.__get_conn()
+
+        if size:
+            cursor.execute(sql)
+            cx_Oracle.Cursor.fetchmany(size)
+        else:
+            print('error')
+
+        return cursor
 
     def execute_sql(self, sql, args=None):
         """
@@ -303,9 +306,16 @@ class OraclePool:
         :param args:    list    sql语句参数
         :return:        tuple   fetch结果
         """
-        conn, cursor = self.__execute(sql, args)
-        conn.commit()
-        self.__reset_conn(conn, cursor)
+        conn, cursor = self.__get_conn()
+
+        if args:
+            # cursor.execute(sql, args)
+            cursor.execute(sql)
+            result = cursor.fetchmany(args)
+        else:
+            cursor.execute(sql)
+
+        return result
 
     def __del__(self):
         """
@@ -325,8 +335,6 @@ config = {
 }
 
 oracle_cursor = OraclePool(config)  # Oracle连接池
-mysql_conn = MySQLPOOL.connection()  # MySQL连接池
-mysql_cursor = mysql_conn.cursor()
 
 
 # pool2 = PooledDB(cx_Oracle, user='NJJBXQ_DJGBZ', password='11111', dsn='192.168.189.208:1522/orcl11g', mincached=5, maxcached=20)
@@ -354,34 +362,33 @@ sys.stdout = Logger(stream=sys.stdout)
 os.environ['NLS_LANG'] = 'SIMPLIFIED CHINESE_CHINA.UTF8'  # 设置字符集为UTF8，防止中文乱码
 # ora_conn = 'test2/oracle@192.168.189.208:1522/orcl11g'  # test2
 ora_conn = 'datatest/oracle@172.16.4.81/orcl'  # NJJBXQ_DJGBZ
-mysql_conn = '172.16.4.81'
+# mysql_ip = '172.16.4.81'
 mysql_target_db = 'test'
 source_db = cx_Oracle.connect(ora_conn)  # 源库Oracle的数据库连接
-target_db = pymysql.connect(mysql_conn, "root", "Gepoint", mysql_target_db)  # 目标库MySQL的数据库连接
+# target_db = pymysql.connect(mysql_ip, "root", "Gepoint", mysql_target_db)  # 目标库MySQL的数据库连接
 source_db_type = 'Oracle'  # 大小写无关，后面会被转为大写
 target_db_type = 'MySQL'  # 大小写无关，后面会被转为大写
 cur_select = source_db.cursor()  # 源库Oracle查询源表有几列
 cur_tblprt = source_db.cursor()  # 生成用于输出表名的游标对象
 cur_oracle_result = source_db.cursor()  # 查询Oracle源表的游标结果集
-cur_insert_mysql = target_db.cursor()  # 目标库MySQL插入目标表执行的插入sql
-cur_createtbl = target_db.cursor()
-cur_drop_table = target_db.cursor()  # 在MySQL清除表 drop table if exists
+# cur_insert_mysql = target_db.cursor()  # 目标库MySQL插入目标表执行的插入sql
+# cur_createtbl = target_db.cursor()
+# cur_drop_table = target_db.cursor()  # 在MySQL清除表 drop table if exists
 cur_source_constraint = source_db.cursor()
-cur_target_constraint = target_db.cursor()
+# cur_target_constraint = target_db.cursor()
+cur_oracle_result.prefetchrows = 20000
 cur_oracle_result.arraysize = 20000  # Oracle数据库游标对象结果集返回的行数即每次获取多少行
-cur_insert_mysql.arraysize = 20000  # MySQL数据库批量插入的行数
-# 以下为异步迁移数据单独创建了连接
-source_db2 = cx_Oracle.connect(ora_conn)  # 源库Oracle的数据库连接
-cur_select2 = source_db2.cursor()  # 源库Oracle查询源表有几列
-cur_oracle_result2 = source_db2.cursor()  # 查询Oracle源表的游标结果集
-cur_oracle_result2.arraysize = 20000
-target_db1 = pymysql.connect(mysql_conn, "root", "Gepoint", mysql_target_db)  # 目标库MySQL的数据库连接
-target_db2 = pymysql.connect(mysql_conn, "root", "Gepoint", mysql_target_db)  # 目标库MySQL的数据库连接
-cur_insert_mysql1 = target_db1.cursor()  # 目标库MySQL插入目标表执行的插入sql
-cur_insert_mysql2 = target_db2.cursor()  # 目标库MySQL插入目标表执行的插入sql
-cur_insert_mysql1.arraysize = 20000
-cur_insert_mysql2.arraysize = 20000
+# cur_insert_mysql.arraysize = 20000  # MySQL数据库批量插入的行数
+fetch_many_count = 20000
+# target_db1 = pymysql.connect(mysql_ip, "root", "Gepoint", mysql_target_db)  # 目标库MySQL的数据库连接
+# cur_insert_mysql1 = target_db1.cursor()  # 目标库MySQL插入目标表执行的插入sql 普通连接
+# MySQL连接池以及游标
+mysql_conn = MySQLPOOL.connection()  # MySQL连接池
+mysql_cursor = mysql_conn.cursor()
+mysql_cursor.arraysize = 20000
 
+
+# MySQL连接池以及游标
 
 # clob、blob、nclob要在读取源表前加载outputtypehandler属性,即将Oracle大字段转为string类型
 # 处理Oracle的number类型浮点数据与Python decimal类型的转换
@@ -398,7 +405,7 @@ def dataconvert(cursor, name, defaultType, size, precision, scale):
 
 
 cur_oracle_result.outputtypehandler = dataconvert  # 查询Oracle表数据结果集的游标
-cur_oracle_result2.outputtypehandler = dataconvert  # 查询Oracle表数据结果集的游标
+# cur_oracle_result2.outputtypehandler = dataconvert  # 查询Oracle表数据结果集的游标
 cur_source_constraint.outputtypehandler = dataconvert  # 查询Oracle主键以及索引、外键的游标
 
 # 用于记录ddl创建失败的表名
@@ -508,7 +515,8 @@ def split_success_list():  # 将创建表成功的list结果分为2个小list,�
 def print_source_info():
     print('-' * 50 + 'Oracle->MySQL' + '-' * 50)
     print(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time())))
-    print('源Oracle数据库连接信息: ' + ora_conn)
+    print(
+        '源Oracle数据库连接信息: ' + cur_oracle_result.connection.tnsentry + ' 用户名:' + cur_oracle_result.connection.username + ' 版本:' + cur_oracle_result.connection.version + ' 编码:' + cur_oracle_result.connection.encoding)
     cur_select.execute("""select count(*) from user_tables""")
     source_table_count = cur_select.fetchone()[0]
     cur_select.execute("""select count(*) from user_views""")
@@ -530,7 +538,7 @@ def print_source_info():
     print('源存储过程总计: ' + str(source_procedure_count))
     print('源数据库函数总计: ' + str(source_function_count))
     print('源数据库包总计: ' + str(source_package_count))
-    print('目标MySQL数据库连接信息: ' + 'ip-> ' + mysql_conn + ' database-> ' + mysql_target_db)
+    print('目标MySQL数据库连接信息: ' + str(mysql_cursor._con._kwargs))
 
 
 # 获取Oracle的主键字段
@@ -975,7 +983,8 @@ def user_constraint():
         create_index_sql = d[0]
         print(create_index_sql)
         try:
-            cur_target_constraint.execute(create_index_sql)
+            # cur_target_constraint.execute(create_index_sql)
+            mysql_cursor.execute(create_index_sql)
             print('约束以及索引创建完毕\n')
         except Exception:
             constraint_failed_count.append('1')  # 用来统计主键或者索引创建失败的计数，只要创建失败就往list存1
@@ -1008,7 +1017,8 @@ def user_foreign_key(table_name):
         create_foreign_key_sql = e[0]
         print(create_foreign_key_sql)
         try:
-            cur_target_constraint.execute(create_foreign_key_sql)
+            # cur_target_constraint.execute(create_foreign_key_sql)
+            mysql_cursor.execute(create_foreign_key_sql)
             print('外键创建完毕\n')
         except Exception:
             foreignkey_failed_count.append('1')  # 外键创建失败就往list对象存1
@@ -1093,7 +1103,7 @@ def auto_increament_col():
         create_autoincrea_index = v_increa_index[0]
         print(create_autoincrea_index)
         try:
-            cur_insert_mysql.execute(create_autoincrea_index)
+            mysql_cursor.execute(create_autoincrea_index)
         except Exception:
             print('用于自增列的索引创建失败，请检查源触发器！\n')
             print(traceback.format_exc())
@@ -1117,7 +1127,7 @@ def auto_increament_col():
         print('\n执行sql alter table：\n')
         print(alter_increa_col)
         try:  # 注意下try要在for里面
-            cur_insert_mysql.execute(alter_increa_col)
+            mysql_cursor.execute(alter_increa_col)
         except Exception:  # 如果有异常打印异常信息，并跳过继续下个自增列修改
             autocol_failed_count.append('1')
             print('修改自增列失败，请检查源触发器！\n')
@@ -1164,8 +1174,10 @@ def create_view():
         create_view_sql = e[1]
         print(create_view_sql)
         try:
-            cur_target_constraint.execute("""drop view  if exists %s""" % view_name)
-            cur_target_constraint.execute(create_view_sql)
+            # cur_target_constraint.execute("""drop view  if exists %s""" % view_name)
+            # cur_target_constraint.execute(create_view_sql)
+            mysql_cursor.execute("""drop view  if exists %s""" % view_name)
+            mysql_cursor.execute(create_view_sql)
             print('视图创建完毕\n')
         except Exception:
             view_failed_count.append('1')  # 视图创建失败就往list对象存1
@@ -1199,7 +1211,8 @@ def create_comment():
         print(create_comment_sql)
         try:
             print('正在添加' + table_name + '的注释:')
-            cur_target_constraint.execute(create_comment_sql)
+            # cur_target_constraint.execute(create_comment_sql)
+            mysql_cursor.execute(create_comment_sql)
             print('comment注释添加完毕\n')
         except Exception:
             comment_failed_count.append('1')  # comment添加失败就往list对象存1
@@ -1293,13 +1306,13 @@ def mig_table(tablename):
     target_effectrow = 0
     while True:
         rows = list(cur_oracle_result.fetchmany(
-            5000))  # 每次获取2000行，cur_oracle_result.arraysize值决定，MySQL fetchmany 返回的是 tuple 数据类型 所以用list做类型转换
+            20000))  # 每次获取2000行，cur_oracle_result.arraysize值决定，MySQL fetchmany 返回的是 tuple 数据类型 所以用list做类型转换
         #  print(cur_oracle_result.description)  # 打印Oracle查询结果集字段列表以及类型
         try:
-            cur_insert_mysql.executemany(insert_sql, rows)  # 批量插入每次5000行，需要注意的是 rows 必须是 list [] 数据类型
+            mysql_cursor.executemany(insert_sql, rows)  # 批量插入每次5000行，需要注意的是 rows 必须是 list [] 数据类型
             # mysql_cursor.executemany(insert_sql, rows)
             # mysql_conn.commit() 对于连接池，这里需要显式提交
-            target_db.commit()  # 提交
+            # target_db.commit()  # 提交
         except Exception as e:
             print(traceback.format_exc())  # 遇到异常记录到log，会继续迁移下张表
             #  print(tablename, '表记录', rows, '插入失败') 插入失败时输出insert语句
@@ -1327,7 +1340,6 @@ def mig_table(tablename):
 # 在MySQL创建表结构以及添加主键
 def create_meta_table():  # 调用create_table函数来创建表的
     tableoutput_sql = 'select table_name from user_tables  order by table_name  desc'  # 查询需要导出的表
-    # cur_tblprt.execute(tableoutput_sql)
     output_table_name = oracle_cursor.fetch_all(tableoutput_sql)
     starttime = datetime.datetime.now()
     for row in output_table_name:
@@ -1415,11 +1427,15 @@ def mig_table_task(list_index):
         target_table = source_table = table_name
         if source_db_type.upper() == 'ORACLE':
             get_column_length = 'select count(*) from user_tab_columns where table_name= ' + "'" + source_table.upper() + "'"  # 拼接获取源表有多少个列的SQL
-        cur_select.execute(get_column_length)  # 执行
-        col_len = cur_select.fetchone()
-        # col_len = oracle_cursor.fetch_one(get_column_length)  # 获取源表有多少个列
+        # cur_select.execute(get_column_length)  # 执行 普通连接
+        # col_len = cur_select.fetchone()
+        col_len = oracle_cursor.fetch_one(get_column_length)  # 获取源表有多少个列 oracle连接池
         col_len = col_len[0]  # 将游标结果数组的值赋值，该值为表列字段总数
         val_str = ''  # 用于生成批量插入的列字段变量
+        for i in range(1, col_len):
+            val_str = val_str + '%s' + ','
+        val_str = val_str + '%s'  # MySQL批量插入语法是 insert into tb_name values(%s,%s,%s,%s)
+        '''
         if target_db_type.upper() == 'MYSQL':
             for i in range(1, col_len):
                 val_str = val_str + '%s' + ','
@@ -1428,26 +1444,29 @@ def mig_table_task(list_index):
             for i in range(1, col_len):
                 val_str = val_str + ':' + str(i) + ','
             val_str = val_str + ':' + str(col_len)  # Oracle批量插入语法是 insert into tb_name values(:1,:2,:3)
+        '''
         insert_sql = 'insert into ' + target_table + ' values(' + val_str + ')'  # 拼接insert into 目标表 values  #目标表插入语句
         select_sql = 'select * from ' + source_table  # 源查询SQL，如果有where过滤条件，在这里拼接
         try:
             cur_oracle_result.execute(select_sql)  # 执行
+            # temp_cur = oracle_cursor.execute_sql(select_sql, 1000)
         except Exception:
             print('查询Oracle源表失败，请检查连接！\n\n')
+            print(traceback.format_exc())
             break
         print("\033[31m正在执行插入表:\033[0m", table_name)
         print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
         source_effectrow = 0
         target_effectrow = 0
         while True:
-            rows = list(cur_oracle_result.fetchmany(
-                20000))  # 每次获取2000行，cur_oracle_result.arraysize值决定，MySQL fetchmany 返回的是 tuple 数据类型 所以用list做类型转换
+            rows = list(
+                cur_oracle_result.fetchmany(20000))  # 每次获取2000行，cur_oracle_result.arraysize值决定，MySQL fetchmany 返回的是 tuple 数据类型 所以用list做类型转换
             #  print(cur_oracle_result.description)  # 打印Oracle查询结果集字段列表以及类型
             try:
-                cur_insert_mysql1.executemany(insert_sql, rows)  # 批量插入每次5000行，需要注意的是 rows 必须是 list [] 数据类型
+                mysql_cursor.executemany(insert_sql, rows)  # 批量插入每次5000行，需要注意的是 rows 必须是 list [] 数据类型
                 # mysql_cursor.executemany(insert_sql, rows)
                 # mysql_conn.commit() 对于连接池，这里需要显式提交
-                target_db1.commit()  # 提交
+                # target_db1.commit()  # 提交
             except Exception as e:
                 time.sleep(0.1)
                 print(traceback.format_exc())  # 遇到异常记录到log，会继续迁移下张表
@@ -1466,7 +1485,7 @@ def mig_table_task(list_index):
             if not rows:
                 break  # 当前表游标获取不到数据之后中断循环，返回到mig_database，可以继续下个表
             source_effectrow = cur_oracle_result.rowcount  # 计数源表插入的行数
-            target_effectrow = target_effectrow + cur_insert_mysql1.rowcount  # 计数目标表插入的行数
+            target_effectrow = target_effectrow + mysql_cursor.rowcount  # 计数目标表插入的行数
         print('源表查询总数:', source_effectrow)
         print('目标插入总数:', target_effectrow)
         print('插入完成')
@@ -1764,8 +1783,8 @@ def mig_summary():
     # Oracle源表信息
 
     # MySQL迁移计数
-    cur_insert_mysql.execute("""select database()""")
-    mysql_database_name = cur_insert_mysql.fetchone()[0]
+    mysql_cursor.execute("""select database()""")
+    mysql_database_name = mysql_cursor.fetchone()[0]
     mysql_table_count = 0
     filepath = '/tmp/ddl_success_table.log'
     if os.path.exists(filepath):
@@ -1828,7 +1847,7 @@ if __name__ == '__main__':
     create_meta_constraint()  # 3、创建约束
     create_meta_foreignkey()  # 4、创建外键
     # mig_database()  # 5、迁移数据 (只迁移DDL创建成功的表) 串行
-    async_work()
+    async_work()  # 异步迁移数据
     # t = ThreadPoolExecutor(max_workers=2)  # 异步方式迁移数据
     # task1 = t.submit(mig_table_task1, '0')  # 此行下面的函数会以异步方式进行
     # mig_table_task2('1')
@@ -1859,6 +1878,6 @@ if __name__ == '__main__':
     '''
     mig_summary()
 cur_select.close()
-cur_insert_mysql.close()
+# cur_insert_mysql.close()
 source_db.close()
-target_db.close()
+# target_db.close()
