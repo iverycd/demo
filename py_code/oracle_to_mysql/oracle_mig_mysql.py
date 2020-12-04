@@ -2,7 +2,7 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.4.4
+# V1.5
 
 import cx_Oracle
 import os
@@ -40,16 +40,16 @@ class Logger(object):
 # oracle、mysql连接池以及游标对象
 oracle_cursor = configDB.OraclePool()  # Oracle连接池
 mysql_cursor = configDB.MySQLPOOL.connection().cursor()  # MySQL连接池
-mysql_cursor.arraysize = 20000
+mysql_cursor.arraysize = 10000
 
 # 非连接池连接方式以及游标
 ora_conn = configDB.ora_conn  # 读取config.ini文件中ora_conn变量的值
 source_db = cx_Oracle.connect(ora_conn)  # 源库Oracle的数据库连接
 # source_db = cx_Oracle.connect("datatest", "oracle", "orcl")  # tns连接方式（username,password,tns_name）
 cur_oracle_result = source_db.cursor()  # 查询Oracle源表的游标结果集
-cur_oracle_result.prefetchrows = 20000
-cur_oracle_result.arraysize = 20000  # Oracle数据库游标对象结果集返回的行数即每次获取多少行
-fetch_many_count = 20000
+cur_oracle_result.prefetchrows = 10000
+cur_oracle_result.arraysize = 10000  # Oracle数据库游标对象结果集返回的行数即每次获取多少行
+fetch_many_count = 10000
 
 # 计数变量
 list_table_name = []  # 查完user_tables即当前用户所有表存入list
@@ -951,7 +951,8 @@ def create_meta_table():  # 调用create_table函数来创建表的
 
                               )
         create_table_sql = 'create table {0} ({1})'.format(table_name, ','.join(fieldinfos))  # 生成创建目标表的sql
-        # add_pri_key_sql = 'alter table {0} add primary key ({1})'.format(table_name, ','.join(v_pri_key))  # 创建目标表之后增加主键
+        # add_pri_key_sql = 'alter table {0} add primary key ({1})'.format(table_name, ','.join(v_pri_key))  #
+        # 创建目标表之后增加主键
         print('\n创建表:' + table_name + '\n')
         print(create_table_sql)
         try:
@@ -984,39 +985,6 @@ def create_meta_table():  # 调用create_table函数来创建表的
         (endtime - starttime).seconds) + "秒\n")
 
 
-def create_table_main_process():
-    p_starttime = datetime.datetime.now()
-    p_pro = []
-    # 批量调
-    for i in range(2):  # 下面先生成多进程执行的动态变量以及把进程加到list，加到list后统一调用进程开始run
-        exec('p{} = Process(target=create_table_task{}, args=({},))'.format(i, i + 1, i))
-        exec('p_pro.append(p{})'.format(i))
-        # exec('p{}.start()'.format(i))
-    for p_t in p_pro:  # 这里对list中存在的进程统一开始调用
-        p_t.start()
-    for p_t in p_pro:
-        p_t.join()
-    # 批量调
-    '''
-    # 直接调
-    p1 = Process(target=task1, args=('0',))
-    p1.start()
-    p2 = Process(target=task2, args=('1',))
-    p2.start()
-    # 直接调
-    '''
-    time.sleep(0.1)
-    p_endtime = datetime.datetime.now()
-    print('多进程开始时间：', p_starttime, '多进程结束时间：', p_endtime, '执行时间：', str((p_endtime - p_starttime).seconds), 'seconds')
-    time.sleep(0.1)
-    '''
-    t1 = Thread(target=task1)
-    t2 = Thread(target=task2)
-    t1.start()
-    t2.start()
-    '''
-
-
 def mig_table_task(list_index):
     err_count = 0
     if list_index == 0:
@@ -1042,7 +1010,7 @@ def mig_table_task(list_index):
     for v_table_name in new_list[0][int(list_index)]:
         table_name = v_table_name
         print('#' * 50 + '开始迁移表' + table_name + '#' * 50)
-        print('THREAD ' + str(list_index) + ' \n')
+        print('THREAD ' + str(list_index) + ' ' + str(datetime.datetime.now()) + ' \n')
         target_table = source_table = table_name
         get_table_count = oracle_cursor.fetch_one("""select count(*) from %s""" % source_table)[0]
         get_column_length = 'select count(*) from user_tab_columns where table_name= ' + "'" + source_table.upper() + "'"  # 拼接获取源表有多少个列的SQL
@@ -1062,11 +1030,18 @@ def mig_table_task(list_index):
             print(traceback.format_exc())
             break
         print("\033[31m正在执行插入表:\033[0m", table_name)
-        print(datetime.datetime.now())
+        # print(datetime.datetime.now())
         source_effectrow = 0
         target_effectrow = 0
         mysql_insert_count = 0
-        sql_insert_error1 = ''
+        sql_insert_error = ''
+        # mig_table = "'" + table_name + "'"
+        # 往MySQL表my_mig_task_info记录开始插入的时间
+        try:
+            mysql_cursor.execute("""insert into my_mig_task_info(table_name, task_start_time,thread) values ('%s',
+        current_timestamp,%s)""" % (table_name, list_index))  # %s占位符的值需要引号包围
+        except Exception:
+            print(traceback.format_exc())
         while True:
             rows = list(
                 cur_oracle_result.fetchmany(
@@ -1100,24 +1075,25 @@ def mig_table_task(list_index):
                 break  # 当前表游标获取不到数据之后中断循环，返回到mig_database，可以继续下个表
             source_effectrow = cur_oracle_result.rowcount  # 计数源表插入的行数
             target_effectrow = target_effectrow + mysql_cursor.rowcount  # 计数目标表插入的行数
+
         if source_effectrow == target_effectrow:
             is_success = 'Y'
         else:
             is_success = 'N'
-        if sql_insert_error1:
+        if sql_insert_error:
             print('插入失败')
         else:
             print('插入完成')
-        # 将表插入记录数保存到csv文件
-        csv_file = open("/tmp/insert_table.csv", 'a', newline='')
         try:
-            writer = csv.writer(csv_file)
-            writer.writerow((table_name, source_effectrow, target_effectrow, is_success))
+            mysql_cursor.execute("""update my_mig_task_info set task_end_time=current_timestamp, 
+            source_table_rows=%s,
+            target_table_rows=%s,
+            is_success='%s' where table_name='%s'""" % (
+                source_effectrow, target_effectrow, is_success, table_name))  # 占位符需要引号包围
         except Exception:
             print(traceback.format_exc())
-        finally:
-            csv_file.close()
-        print(datetime.datetime.now())
+
+        # print(datetime.datetime.now())
         #  print('执行时间: ' + str(((insert_end_time - insert_start_time).microseconds/1000)) + ' ms')
         print('\n\n')
     print('\033[31m*' * 50 + '第' + str(list_index) + '部分表迁移完成' + '*' * 50 + '\033[0m\n\n\n')
@@ -1130,13 +1106,16 @@ def mig_table_task(list_index):
 def async_work():  # 异步不阻塞方式同时插入表
     begin_time = datetime.datetime.now()
     index = ['0', '1']  # 任务序列
-    csv_path = '/tmp/insert_table.csv'  # 用来记录DDL创建成功的表
-    if os.path.exists(csv_path):  # 在每次创建表前清空文件
-        os.remove(csv_path)  # 删除文件
     csv_file = open("/tmp/insert_table.csv", 'w', newline='')
     writer = csv.writer(csv_file)
-    writer.writerow(('TABLE_NAME', 'TOTAL_ROWS', 'INSERT_ROWS', 'IS_SUCCESS'))
+    writer.writerow(('TABLE_NAME', 'TASK_START_TIME', 'TASK_END_TIME', 'THREAD', 'RUN_TIME', 'TOTAL_ROWS', 'INSERT_ROWS'
+                     , 'IS_SUCCESS'))
     csv_file.close()
+    # 创建迁移任务表，用来统计表插入以及完成的时间
+    mysql_cursor.execute("""drop table if exists my_mig_task_info""")
+    mysql_cursor.execute("""create table my_mig_task_info(table_name varchar(100),task_start_time datetime,
+        task_end_time datetime ,thread int,run_time int,source_table_rows int,target_table_rows int,
+        is_success varchar(10))""")
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         task = {executor.submit(mig_table_task, v_index): v_index for v_index in index}
         for future in concurrent.futures.as_completed(task):
@@ -1149,9 +1128,23 @@ def async_work():  # 异步不阻塞方式同时插入表
                 print('Thread Job ' + str(task_name) + ' Is Done:' + str(data))
     end_time = datetime.datetime.now()
     print('表数据迁移耗时：' + str((end_time - begin_time).seconds))
+    #  计算每张表插入时间
+    try:
+        mysql_cursor.execute("""update my_mig_task_info set run_time=(UNIX_TIMESTAMP(task_end_time) - UNIX_TIMESTAMP(
+    task_start_time))""")
+    except Exception:
+        print('compute my_mig_task_info error')
+    #  表迁移详细记录输出到csv文件
     csv_file = open("/tmp/insert_table.csv", 'a', newline='')
     writer = csv.writer(csv_file)
-    writer.writerow([str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))])
+    mysql_cursor.execute("""select table_name, concat('''',cast(task_start_time as char(20)),''''),
+     concat('''',cast(task_end_time as char(20)),''''), cast(thread as char(20)), run_time,
+    cast(source_table_rows as char(20)), cast(target_table_rows as char(20)),
+    cast(is_success as char(20)) from my_mig_task_info""")
+    mig_task_run_detail = mysql_cursor.fetchall()
+    for res in mig_task_run_detail:
+        writer.writerow(res)
+    writer.writerow([str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))])  # 表迁移完成之后插入时间
     csv_file.close()
 
     #  mig_table_task('1')  # 第二个任务序列
@@ -1176,40 +1169,6 @@ def mig_table_main_process():
     time.sleep(0.1)
 
 
-def mig_table_main_thread():
-    task2_starttime = datetime.datetime.now()
-    for v_table_name in list_success_table:
-        table_name = v_table_name
-        print('#' * 50 + '开始迁移表' + table_name + '#' * 50)
-        print('task2 ' + table_name + '\n')
-        t = Thread(target=mig_table, args=(table_name,))
-        t.start()
-    print('\033[31m*' * 50 + '表迁移完成' + '*' * 50 + '\033[0m\n\n\n')
-    task2_endtime = datetime.datetime.now()
-    task2_exec_time = str((task2_endtime - task2_starttime).seconds)
-    # time.sleep(0.5)
-    print("第二部分的表\n" + "开始时间:" + str(task2_starttime) + '\n' + "结束时间:" + str(
-        task2_endtime) + '\n' + "消耗时间:" + task2_exec_time + "秒\n")
-    '''
-    p_starttime = datetime.datetime.now()
-    p_t = []
-    # 批量调
-    for i in range(2):  # 下面先生成多进程执行的动态变量以及把进程加到list，加到list后统一调用进程开始run
-        exec('t{} = Thread(target=mig_table_task{}, args=({},))'.format(i, i + 1, i))
-        exec('p_t.append(t{})'.format(i))
-        # exec('p{}.start()'.format(i))
-    for t_t in p_t:  # 这里对list中存在的进程统一开始调用
-        t_t.start()
-    for t_t in p_t:
-        t_t.join()
-    # 批量调
-    time.sleep(0.1)
-    p_endtime = datetime.datetime.now()
-    print('多进程开始时间：', p_starttime, '多进程结束时间：', p_endtime, '执行时间：', str((p_endtime - p_starttime).seconds), 'seconds')
-    time.sleep(0.1)
-     '''
-
-
 # 仅用于迁移数据插入失败的表
 def mig_failed_table():
     filename = '/tmp/insert_failed_table.csv'
@@ -1229,12 +1188,6 @@ def mig_failed_table():
                 sys.exit()
             '''
     f.close()
-
-
-def process_bar(percent, start_str='', end_str='', total_length=0):
-    bar = ''.join(["\033[31m%s\033[0m" % '   '] * int(percent * total_length)) + ''
-    bar = '\r' + start_str + bar.ljust(total_length) + ' {:0>4.1f}%|'.format(percent * 100) + end_str
-    print(bar, end='', flush=True)
 
 
 # 迁移摘要
@@ -1277,7 +1230,7 @@ def mig_summary():
     autocol_error_count = len(autocol_failed_count)
     mysql_cursor.execute(
         """select count(*) from information_schema.TABLES where TABLE_SCHEMA in (select database()) 
-        and TABLE_TYPE='BASE TABLE'""")
+        and TABLE_TYPE='BASE TABLE' and table_name !='my_mig_task_info'""")
     mysql_success_table_count = str(mysql_cursor.fetchone()[0])
     mysql_cursor.execute(
         """select count(*) from information_schema.TABLES where TABLE_SCHEMA in (select database()) 
@@ -1339,57 +1292,40 @@ constraint_schema in (select database()) and REFERENCED_TABLE_NAME is not null""
             print(output_fail_view)
         print('\n\n\n')
     print('\n请检查创建失败的表DDL以及约束。有关更多详细信息，请参阅迁移输出信息')
-    print('迁移日志已保存到/tmp/mig.log\n表迁移记录请查看/tmp/insert_table.csv\n有关迁移错误请查看/tmp/ddl_failed_table.log以及/tmp'
+    print('迁移日志已保存到/tmp/mig.log\n表迁移记录请查看/tmp/insert_table.csv或者查询表my_mig_task_info\n有关迁移错误请查看/tmp/ddl_failed_table.log以及/tmp'
           '/insert_failed_table.log')
 
 
 #  print('目标注释添加失败计数: ' + str(comment_error_count))
 
+# 清理日志
+def clean_log():
+    path_file = '/tmp/ddl_success_table.log'  # 用来记录DDL创建成功的表
+    if os.path.exists(path_file):
+        os.remove(path_file)
+    path = '/tmp/ddl_failed_table.log'  # 创建失败的ddl日志文件
+    if os.path.exists(path):
+        os.remove(path)
+    if os.path.exists('/tmp/insert_failed_table.log'):  # 插入失败的表以及sql
+        os.remove('/tmp/insert_failed_table.log')
+    csv_path = '/tmp/insert_table.csv'  # 用来记录表迁移记录
+    if os.path.exists(csv_path):
+        os.remove(csv_path)
+
 
 if __name__ == '__main__':
     mig_start_time = datetime.datetime.now()
-    print_source_info()
-    path_file = '/tmp/ddl_success_table.log'  # 用来记录DDL创建成功的表
-    if os.path.exists(path_file):  # 在每次创建表前清空文件
-        os.remove(path_file)  # 删除文件
-    path = '/tmp/ddl_failed_table.log'  # 创建失败的ddl日志文件
-    if os.path.exists(path):  # 如果文件存在，每次迁移表前先清除失败的表csv文件
-        os.remove(path)  # 删除文件
-    if os.path.exists('/tmp/insert_failed_table.log'):  # 在每次创建表前清空文件
-        os.remove('/tmp/insert_failed_table.log')
-    create_meta_table()  # 创建表结构 串行
+    print_source_info()  # 打印连接信息
+    clean_log()  # 清理上次迁移的log
+    create_meta_table()  # 创建表结构单线程
     split_success_list()  # 把创建成功的表分成2个list
     # create_table_main_process()  # 并行创建表
-    create_meta_constraint()  # 创建约束
-    create_meta_foreignkey()  # 创建外键
-    async_work()  # 异步迁移数据
-    # t = ThreadPoolExecutor(max_workers=2)  # 异步方式迁移数据
-    # task1 = t.submit(mig_table_task1, '0')  # 此行下面的函数会以异步方式进行
-    # mig_table_task2('1')
-    # if task1.done():
-    #    print('表数据迁移完毕！\n\n')
-    # else:
-    #    print('表数据迁移异常，请检查日志！\n\n')
-    # mig_table_main_thread()  # 并行迁移数据
-    # mig_table_task1('0') # 单独执行迁移数据第一部分
-    # mig_table_task2('1') # 单独执行迁移数据第二部分
+    create_meta_constraint()  # 创建主键约束以及索引
+    create_meta_foreignkey()  # 创建外键约束
+    async_work()  # 异步2个线程迁移数据
     auto_increament_col()  # 增加自增列
     create_view()  # 创建视图
     create_comment()  # 添加注释
-    '''
-        # 再次对失败的表迁移数据
-                is_continue = input('是否再次迁移失败的表：Y|N\n')
-        if is_continue == 'Y' or is_continue == 'y':
-            try:
-                print('开始重新插入失败的表\n')
-                mig_failed_table()
-            except Exception as e:
-                print('插入失败')
-        else:
-            print('迁移完毕！')
-    else:
-        print('迁移成功，没有迁移失败的表')
-    '''
     mig_end_time = datetime.datetime.now()
     mig_summary()
 source_db.close()
