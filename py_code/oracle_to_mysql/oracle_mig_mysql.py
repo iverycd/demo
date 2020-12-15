@@ -2,10 +2,9 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.5.2
+# V1.5.3
 import argparse
 import textwrap
-
 import cx_Oracle
 import os
 import time
@@ -16,13 +15,15 @@ import traceback
 import decimal
 import re
 import logging
+from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED, FIRST_COMPLETED
+import concurrent  # 异步任务包
+import configDB  # 引用配置文件以及产生连接池
+
+
 # from multiprocessing.dummy import Pool as ThreadPool
 # import threading
-from threading import Thread
-from multiprocessing import Process  # 下面用了动态变量执行多进程，所以这里是灰色
-from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED, FIRST_COMPLETED
-import concurrent
-import configDB  # 引用配置文件以及产生连接池
+# from threading import Thread # 多线程
+# from multiprocessing import Process  # 下面用了动态变量执行多进程，所以这里是灰色
 
 
 # 记录执行日志
@@ -59,7 +60,7 @@ else:
 # 判断命令行参数-c是否指定
 if args.custom_table.upper() == 'TRUE':
     custom_table = 'true'
-    #  去掉空行
+    #  在当前目录下编辑custom_table.txt，然后对该文件做去掉空行处理，输出到tmp目录
     with open('custom_table.txt', 'r', encoding='utf-8') as fr, open('/tmp/table.txt', 'w', encoding='utf-8') as fd:
         for text in fr.readlines():
             if text.split():
@@ -124,10 +125,6 @@ def dataconvert(cursor, name, defaultType, size, precision, scale):
 
 
 cur_oracle_result.outputtypehandler = dataconvert  # 查询Oracle表数据结果集的游标
-
-
-# cur_oracle_result2.outputtypehandler = dataconvert  # 查询Oracle表数据结果集的游标
-# cur_source_constraint.outputtypehandler = dataconvert  # 查询Oracle主键以及索引、外键的游标
 
 
 # 对list平均分，可以一分为二
@@ -220,7 +217,8 @@ def print_source_info():
         print('源存储过程总计: ' + str(source_procedure_count))
         print('源数据库函数总计: ' + str(source_function_count))
         print('源数据库包总计: ' + str(source_package_count))
-    print('目标数据库连接信息: ' + 'ip:' + str(mysql_info['host']) + ':' + str(mysql_info['port']) + ' 数据库名称: ' + str(mysql_info['database']))
+    print('目标数据库连接信息: ' + 'ip:' + str(mysql_info['host']) + ':' + str(mysql_info['port']) + ' 数据库名称: ' + str(
+        mysql_info['database']))
     # {'host': '172.16.4.81', 'port': 3306, 'user': 'root', 'password': 'Gepoint', 'database': 'test', 'charset': 'utf8mb4'}
 
 
@@ -241,8 +239,6 @@ def table_primary(table_name):
 
 # 获取Oracle的列字段类型以及字段长度以及映射数据类型到MySQL的规则
 def tbl_columns(table_name):
-    # source_db = cx_Oracle.connect(ora_conn)  # ljd 这行必须要加才不会hang
-    # cur_tbl_columns = source_db.cursor()
     sql = """SELECT A.COLUMN_NAME, A.DATA_TYPE, A.DATA_LENGTH, case when A.DATA_PRECISION is null then -1 else  A.DATA_PRECISION end DATA_PRECISION, case when A.DATA_SCALE is null then -1 else  A.DATA_SCALE end DATA_SCALE,  case when A.NULLABLE ='Y' THEN 'True' ELSE 'False' END as isnull, B.COMMENTS,A.DATA_DEFAULT,case when a.AVG_COL_LEN is null then -1 else a.AVG_COL_LEN end AVG_COL_LEN
             FROM USER_TAB_COLUMNS A LEFT JOIN USER_COL_COMMENTS B 
             ON A.TABLE_NAME=B.TABLE_NAME AND A.COLUMN_NAME=B.COLUMN_NAME 
@@ -598,7 +594,6 @@ def create_meta_foreignkey():
             print(create_foreign_key_sql)
             all_fk_count += 1  # 外键总数
             try:
-                # cur_target_constraint.execute(create_foreign_key_sql)
                 mysql_cursor.execute(create_foreign_key_sql)
                 print('外键创建完毕\n')
                 all_fk_success_count += 1
@@ -616,9 +611,9 @@ def create_meta_foreignkey():
                 ddl_foreignkey_error = '\n' + '/* ' + str(e.args) + ' */' + '\n'
                 logging.error(ddl_foreignkey_error)  # 外键创建失败的sql语句输出到文件/tmp/ddl_failed_table.log
     print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
-    print('\033[31m*' * 50 + '外键创建完成' + '*' * 50 + '\033[0m\n\n\n')
     end_time = datetime.datetime.now()
     print('创建外键耗时： ' + str((end_time - begin_time).seconds))
+    print('#' * 50 + '外键创建完成' + '#' * 50 + '\n\n\n')
 
 
 # 批量创建主键以及索引
@@ -709,7 +704,6 @@ def create_meta_constraint():
         create_index_sql = d[0].read()  # 用read读取大对象，否则会报错
         print(create_index_sql)
         try:
-            # cur_target_constraint.execute(create_index_sql)
             mysql_cursor.execute(create_index_sql)
             print('约束以及索引创建完毕\n')
             all_constraints_success_count += 1
@@ -727,23 +721,9 @@ def create_meta_constraint():
             constraint_error_table = '\n' + '/* ' + str(e.args) + ' */' + '\n'  # 这里记下索引创建失败的sql在 ddl_failed_table.log
             logging.error(constraint_error_table)  # ddl创建失败的sql语句输出到文件/tmp/constraint_error_table.log
     print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
-    print('\033[31m*' * 50 + '主键约束、索引创建完成' + '*' * 50 + '\033[0m\n\n\n')
     end_time = datetime.datetime.now()
     print('创建约束以及索引耗时： ' + str((end_time - start_time).seconds))
-    #  将创建失败的sql记录到log文件
-    # logging.basicConfig(filename='/tmp/constraint_failed_table.log')
-    """
-    之前是调用user_constraint函数按每张表批量创建主键以及索引，现在改为了一次性创建约束以及索引
-     filename = '/tmp/ddl_success_table.log'  # 读取DDL创建成功的表名
-    with open(filename) as f:
-        reader = csv.reader(f)
-        for row in reader:
-            tbl_name = row[0]
-            print('#' * 50 + '开始创建' + tbl_name + '约束以及索引 ' + '#' * 50)
-            user_constraint()  # 之前是调用user_constraint函数按每张表批量创建主键以及索引，现在改为了一次性创建约束以及索引
-        print('\033[31m*' * 50 + '主键约束、索引创建完成' + '*' * 50 + '\033[0m\n\n\n')
-    f.close()
-    """
+    print('#' * 50 + '主键约束、索引创建完成' + '#' * 50 + '\n\n\n')
 
 
 # 查找具有自增特性的表以及字段名称
@@ -809,10 +789,9 @@ def auto_increament_col():
             f.close()
             ddl_incindex_error = '\n' + '/* ' + str(e.args) + ' */' + '\n'
             logging.error(ddl_incindex_error)  # 自增用索引创建失败的sql语句输出到文件/tmp/ddl_failed_table.log
-    print('自增列索引创建完成')
-    print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+    print('自增列索引创建完成 ' + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
 
-    print('开始修改自增列属性：')
+    print('\n开始修改自增列属性：')
     print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
     all_alter_sql = oracle_cursor.fetch_all("""
     select 'alter table '||table_name||' modify '||upper(substr(substr(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.')), 1, instr(upper(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.'))), ' FROM DUAL;') - 1), 5)) ||' int auto_increment;' from trigger_name where instr(upper(trigger_body), 'NEXTVAL')>0
@@ -837,13 +816,13 @@ def auto_increament_col():
             ddl_increa_col_error = '\n' + '/* ' + str(e.args) + ' */' + '\n'
             logging.error(ddl_increa_col_error)  # 自增用索引创建失败的sql语句输出到文件/tmp/ddl_failed_table.log
     print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
-    print('\033[31m*' * 50 + '自增列修改完成' + '*' * 50 + '\033[0m\n\n\n')
+    end_time = datetime.datetime.now()
+    print('修改自增列耗时： ' + str((end_time - start_time).seconds))
+    print('#' * 50 + '自增列修改完成' + '#' * 50 + '\n\n\n')
     oracle_autocol_total.append(
         oracle_cursor.fetch_one("""select count(*) from trigger_name  where instr(upper(trigger_body), 'NEXTVAL')>0""")[
             0])  # 将自增列的总数存入list
     oracle_cursor.execute_sql("""drop table trigger_name purge""")
-    end_time = datetime.datetime.now()
-    print('修改自增列耗时： ' + str((end_time - start_time).seconds))
 
 
 # 获取视图定义以及创建
@@ -853,7 +832,7 @@ def create_view():
     global all_view_failed_count
     begin_time = datetime.datetime.now()
     if custom_table.upper() == 'TRUE':  # 如果命令行-c开启就不创建视图
-        print('\n\n无视图创建')
+        print('\n\n' + '#' * 50 + '无视图创建' + '#' * 50 + '\n')
     else:  # 创建全部视图
         print('#' * 50 + '开始创建视图' + '#' * 50)
         print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
@@ -928,7 +907,7 @@ def create_comment():
             select 'alter table '||TABLE_NAME||' comment '||''''||COMMENTS||'''' as create_comment
          from USER_TAB_COMMENTS where COMMENTS is not null
             """)
-    for e in all_comment_sql:
+    for e in all_comment_sql:  # 一次性创建注释
         # table_name = e[0]
         create_comment_sql = e[0]
         try:
@@ -951,9 +930,9 @@ def create_comment():
             ddl_comment_error = '\n' + '/* ' + str(e.args) + ' */' + '\n'
             logging.error(ddl_comment_error)  # comment注释创建失败的sql语句输出到文件/tmp/ddl_failed_table.log
     print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
-    print('\033[31m*' * 50 + 'comment注释添加完成' + '*' * 50 + '\033[0m\n\n\n')
     end_time = datetime.datetime.now()
     print('创建comment耗时：' + str((end_time - begin_time).seconds))
+    print('#' * 50 + 'comment注释添加完成' + '#' * 50 + '\033[0m\n\n\n')
 
 
 # 仅输出Oracle当前用户的表，即user_tables的table_name
@@ -962,18 +941,6 @@ def print_table():
     all_table = oracle_cursor.fetch_all(tableoutput_sql)
     for v_table in all_table:
         list_table_name.append(v_table[0])
-    '''    
-    cur_tblprt = source_db.cursor()  # 生成用于输出表名的游标对象
-    #   where table_name in (\'TEST4\',\'TEST3\',\'TEST2\')
-    tableoutput_sql = 'select table_name from user_tables  order by table_name  desc'  # 查询需要导出的表
-    cur_tblprt.execute(tableoutput_sql)  # 执行
-    filename = '/tmp/table_name.csv'
-    f = open(filename, 'w')
-    for row_table in cur_tblprt:
-        table_name = row_table[0]
-        f.write(table_name + '\n')
-    f.close()
-    '''
 
 
 # 将ddl创建成功的表记录到csv文件
@@ -1130,15 +1097,15 @@ def create_meta_table():
             ddl_create_error_table = '\n' + '/* ' + str(e.args) + ' */' + '\n'
             logging.error(ddl_create_error_table)  # ddl创建失败的sql语句输出到文件/tmp/ddl_failed_table.log
             print('表' + table_name + '创建失败请检查ddl语句!\n')
-    print('\033[31m*' * 50 + '表创建完成' + '*' * 50 + '\033[0m\n\n\n')
     endtime = datetime.datetime.now()
     print("表创建耗时\n" + "开始时间:" + str(starttime) + '\n' + "结束时间:" + str(endtime) + '\n' + "消耗时间:" + str(
         (endtime - starttime).seconds) + "秒\n")
+    print('#' * 50 + '表创建完成' + '#' * 50 + '\n\n\n')
 
 
 def mig_table_task(list_index):
     err_count = 0
-    if list_index == 0:
+    if list_index == 0:  # 以下为每个任务单独创建连接
         source_db0 = cx_Oracle.connect(ora_conn)
         cur_oracle_result = source_db0.cursor()  # 查询Oracle源表的游标结果集
         cur_oracle_result.outputtypehandler = dataconvert
@@ -1160,7 +1127,7 @@ def mig_table_task(list_index):
     task_starttime = datetime.datetime.now()
     for v_table_name in new_list[0][int(list_index)]:
         table_name = v_table_name
-        print('#' * 50 + '开始迁移表' + table_name + '#' * 50)
+        print('#' * 50 + '开始迁移表' + table_name + ' thread ' + str(list_index) + '#' * 50)
         print('THREAD ' + str(list_index) + ' ' + str(datetime.datetime.now()) + ' \n')
         target_table = source_table = table_name
         get_table_count = oracle_cursor.fetch_one("""select count(*) from %s""" % source_table)[0]
@@ -1180,7 +1147,7 @@ def mig_table_task(list_index):
             print('查询Oracle源表失败，请检查连接！\n\n')
             print(traceback.format_exc())
             break
-        print("\033[31m正在执行插入表:\033[0m", table_name)
+        print("正在执行插入表:", table_name)
         # print(datetime.datetime.now())
         source_effectrow = 0
         target_effectrow = 0
@@ -1247,14 +1214,15 @@ def mig_table_task(list_index):
         # print(datetime.datetime.now())
         #  print('执行时间: ' + str(((insert_end_time - insert_start_time).microseconds/1000)) + ' ms')
         print('\n\n')
-    print('\033[31m*' * 50 + '第' + str(list_index) + '部分表迁移完成' + '*' * 50 + '\033[0m\n\n\n')
     task_endtime = datetime.datetime.now()
     task_exec_time = str((task_endtime - task_starttime).seconds)
     print("第" + str(list_index) + "部分的表\n" + "开始时间:" + str(task_starttime) + '\n' + "结束时间:" + str(
         task_endtime) + '\n' + "消耗时间:" + task_exec_time + "秒\n")
+    print('第' + str(list_index) + '部分表迁移完成\n\n\n')
 
 
 def async_work():  # 异步不阻塞方式同时插入表
+    print('#' * 50 + '开始数据迁移' + '#' * 50 + '\n')
     begin_time = datetime.datetime.now()
     index = ['0', '1']  # 任务序列
     csv_file = open("/tmp/insert_table.csv", 'w', newline='')
@@ -1278,8 +1246,10 @@ def async_work():  # 异步不阻塞方式同时插入表
                 print('%r generated an exception: %s' % (task_name, exc))
             else:
                 print('Thread Job ' + str(task_name) + ' Is Done:' + str(data))
+                print('-' * 50 + '\n')
     end_time = datetime.datetime.now()
-    print('表数据迁移耗时：' + str((end_time - begin_time).seconds))
+    print('表数据迁移耗时：' + str((end_time - begin_time).seconds) + '\n')
+    print('#' * 50 + '表数据插入完成' + '#' * 50 + '\n')
     #  计算每张表插入时间
     try:
         mysql_cursor.execute("""update my_mig_task_info set run_time=(UNIX_TIMESTAMP(task_end_time) - UNIX_TIMESTAMP(
@@ -1298,8 +1268,6 @@ def async_work():  # 异步不阻塞方式同时插入表
         writer.writerow(res)
     writer.writerow([str(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))])  # 表迁移完成之后插入时间
     csv_file.close()
-
-    #  mig_table_task('1')  # 第二个任务序列
 
 
 def mig_table_main_process():
@@ -1321,31 +1289,10 @@ def mig_table_main_process():
     time.sleep(0.1)
 
 
-# 仅用于迁移数据插入失败的表
-def mig_failed_table():
-    filename = '/tmp/insert_failed_table.csv'
-    with open(filename) as f:
-        reader = csv.reader(f)
-        for row in reader:
-            tbl_name = row[0]
-            print("\033[31m开始迁移：\033[0m" + tbl_name)
-            mig_table(tbl_name)
-            is_continue = input('是否结束：Y|N\n')
-            print(tbl_name + '插入完毕', time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
-            '''
-            if is_continue == 'Y' or is_continue == 'y':
-                print() #  continue
-            else:
-                print(tbl_name + '插入完毕', time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
-                sys.exit()
-            '''
-    f.close()
-
-
 # 迁移摘要
 def mig_summary():
     # Oracle源表信息
-    oracle_schema = oracle_cursor.fetch_one("""select user from dual""")[0]
+    # oracle_schema = oracle_cursor.fetch_one("""select user from dual""")[0]
     oracle_tab_count = all_table_count  # oracle要迁移的表总数
     oracle_view_count = all_view_count  # oracle要创建的视图总数
     oracle_constraint_count = all_constraints_count  # oracle的约束以及索引总数
@@ -1393,7 +1340,7 @@ def mig_summary():
     print('5、外键总计: ' + str(oracle_fk_count) + ' 目标外键创建成功计数: ' + mysql_success_fk + ' 目标外键创建失败计数: ' +
           str(fk_failed_count))
     csv_file = open("/tmp/insert_table.csv", 'a', newline='')
-    # 将MySQL表总数记录保存到csv文件
+    # 将MySQL创建成功的表总数记录保存到csv文件
     try:
         writer = csv.writer(csv_file)
         writer.writerow(('TOTAL:', mysql_success_table_count))
@@ -1416,8 +1363,6 @@ def mig_summary():
         '迁移日志已保存到/tmp/mig.log\n表迁移记录请查看/tmp/insert_table.csv或者查询表my_mig_task_info\n有关迁移错误请查看/tmp/ddl_failed_table.log以及/tmp'
         '/insert_failed_table.log')
 
-
-#  print('目标注释添加失败计数: ' + str(comment_error_count))
 
 # 清理日志
 def clean_log():
