@@ -2,7 +2,7 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.5.3
+# V1.5.4
 import argparse
 import textwrap
 import cx_Oracle
@@ -49,17 +49,23 @@ EXAMPLE:
 parser.add_argument('--batch_size', '-b', help='fetch and insert row size,default 10000', type=int)
 parser.add_argument('--custom_table', '-c', help='mig some tables not all tables into MySQL,default false',
                     choices=['true', 'false'], default='false')  # 默认是全表迁移
+parser.add_argument('--data_only', '-d', help='mig only data row', choices=['true', 'false'], default='false')
 args = parser.parse_args()
 
 # 判断命令行参数-b是否指定
 if args.batch_size:
     row_batch_size = args.batch_size
 else:
-    row_batch_size = 10000
+    row_batch_size = 20000
 
 # 判断命令行参数-c是否指定
 if args.custom_table.upper() == 'TRUE':
     custom_table = 'true'
+    with open('custom_table.txt', 'r', encoding='utf-8') as fr, open('/tmp/table.txt', 'w', encoding='utf-8') as fd:
+        row_count = len(fr.readlines())
+    if row_count < 1:
+        print('!!!请检查当前目录custom_table.txt是否有表名!!!\n\n\n')
+        time.sleep(2)
     #  在当前目录下编辑custom_table.txt，然后对该文件做去掉空行处理，输出到tmp目录
     with open('custom_table.txt', 'r', encoding='utf-8') as fr, open('/tmp/table.txt', 'w', encoding='utf-8') as fd:
         for text in fr.readlines():
@@ -67,6 +73,7 @@ if args.custom_table.upper() == 'TRUE':
                 fd.write(text)
 else:
     custom_table = 'false'
+
 # oracle、mysql连接池以及游标对象
 oracle_cursor = configDB.OraclePool()  # Oracle连接池
 mysql_cursor = configDB.MySQLPOOL.connection().cursor()  # MySQL连接池
@@ -178,7 +185,7 @@ def bisector_list(tabulation: list, num: int):
 
 def split_success_list():  # 将创建表成功的list结果分为2个小list,平均分
     # n = round(len(list_success_table) / 2)
-    n = 2  # 平均分成2份list
+    n = 4  # 平均分成2份list
     # print('切片的大小:', n)
     # print('原始list：', list_success_table, '\n')
     new_list.append(bisector_list(list_success_table, n))
@@ -303,7 +310,7 @@ def tbl_columns(table_name):
                               )
 
         # 时间日期类型映射规则，Oracle date类型映射为MySQL类型datetime
-        elif column[1] == 'DATE' or column[1] == 'TIMESTAMP(6)':
+        elif column[1] == 'DATE' or column[1] == 'TIMESTAMP(6)' or column[1] == 'TIMESTAMP(0)':
             # Oracle 默认值sysdate映射到MySQL默认值current_timestamp
             if column[7] == 'sysdate' or column[7] == '( (SYSDATE) )':
                 result.append({'fieldname': column[0],  # 如下为字段的属性值
@@ -365,7 +372,9 @@ def tbl_columns(table_name):
                     result.append({'fieldname': column[0],
                                    'type': 'BIGINT',  # 列字段类型以及长度范围
                                    'primary': column[0],  # 如果有主键字段返回true，否则false
-                                   'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值,正则方式仅提取数字
+                                   'default': '' if column[7].upper() == """''""" else
+                                   re.findall(r'\b\d+\b', column[7])[0],
+                                   # 字段默认值如果是''包围则将MySQL默认值调整为null，其余单引号包围去掉括号，仅提取数字
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
                                    }
@@ -392,11 +401,22 @@ def tbl_columns(table_name):
                                    'comment': column[6]
                                    }
                                   )
+                elif column[7].upper() == '':  # 对默认值的字符串值等于''的做判断
+                    result.append({'fieldname': column[0],
+                                   'type': 'INT',  # 列字段类型以及长度范围
+                                   'primary': column[0],  # 如果有主键字段返回true，否则false
+                                   'default': column[7],  # 字段默认值,设为原值null
+                                   'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                                   'comment': column[6]
+                                   }
+                                  )
                 else:  # 其余情况通过正则只提取数字部分，即去掉原Oracle中有括号的默认值
                     result.append({'fieldname': column[0],
                                    'type': 'INT',  # 列字段类型以及长度范围
                                    'primary': column[0],  # 如果有主键字段返回true，否则false
-                                   'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值去掉括号，仅提取数字
+                                   'default': '' if column[7].upper() == """''""" else
+                                   re.findall(r'\b\d+\b', column[7])[0],
+                                   # 字段默认值如果是''包围则将MySQL默认值调整为null，其余单引号包围去掉括号，仅提取数字
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
                                    }
@@ -423,11 +443,22 @@ def tbl_columns(table_name):
                                    'comment': column[6]
                                    }
                                   )
+                elif column[7].upper() == '':  # 对默认值的字符串值等于''的做判断
+                    result.append({'fieldname': column[0],
+                                   'type': 'BIGINT',  # 列字段类型以及长度范围
+                                   'primary': column[0],  # 如果有主键字段返回true，否则false
+                                   'default': column[7],  # 字段默认值,设为原值null
+                                   'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                                   'comment': column[6]
+                                   }
+                                  )
                 else:  # 其余情况通过正则只提取数字部分，即去掉原Oracle中有括号的默认值
                     result.append({'fieldname': column[0],
                                    'type': 'BIGINT',  # 列字段类型以及长度范围
                                    'primary': column[0],  # 如果有主键字段返回true，否则false
-                                   'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值去掉括号，仅提取数字
+                                   'default': '' if column[7].upper() == """''""" else
+                                   re.findall(r'\b\d+\b', column[7])[0],
+                                   # 字段默认值如果是''包围则将MySQL默认值调整为null，其余单引号包围去掉括号，仅提取数字
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
                                    }
@@ -458,7 +489,9 @@ def tbl_columns(table_name):
                     result.append({'fieldname': column[0],
                                    'type': 'INT',  # 列字段类型以及长度范围
                                    'primary': column[0],  # 如果有主键字段返回true，否则false
-                                   'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值去掉括号，仅提取数字
+                                   'default': '' if column[7].upper() == """''""" else
+                                   re.findall(r'\b\d+\b', column[7])[0],
+                                   # 字段默认值如果是''包围则将MySQL默认值调整为null，其余单引号包围去掉括号，仅提取数字
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
                                    }
@@ -488,7 +521,9 @@ def tbl_columns(table_name):
                     result.append({'fieldname': column[0],
                                    'type': 'BIGINT',  # 列字段类型以及长度范围
                                    'primary': column[0],  # 如果有主键字段返回true，否则false
-                                   'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值仅提取数字部分
+                                   'default': '' if column[7].upper() == """''""" else
+                                   re.findall(r'\b\d+\b', column[7])[0],
+                                   # 字段默认值如果是''包围则将MySQL默认值调整为null，其余单引号包围去掉括号，仅提取数字
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
                                    }
@@ -518,7 +553,9 @@ def tbl_columns(table_name):
                     result.append({'fieldname': column[0],
                                    'type': 'INT',  # 列字段类型以及长度范围
                                    'primary': column[0],  # 如果有主键字段返回true，否则false
-                                   'default': re.findall(r'\b\d+\b', column[7])[0],  # 字段默认值，仅提取数字部分
+                                   'default': '' if column[7].upper() == """''""" else
+                                   re.findall(r'\b\d+\b', column[7])[0],
+                                   # 字段默认值如果是''包围则将MySQL默认值调整为null，其余单引号包围去掉括号，仅提取数字
                                    'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
                                    'comment': column[6]
                                    }
@@ -960,77 +997,119 @@ def print_insert_failed_table(table_name):
 
 
 # 批量将Oracle数据插入到MySQL的方法,之前是调用该函数串行迁移表，现在是异步，async_work来去取代
-def mig_table(tablename):
-    # source_db = cx_Oracle.connect(ora_conn)
-    # cur_oracle_result = source_db.cursor
-    # mysql_conn = MySQLPOOL.connection()  # MySQL连接池
-    # mysql_cursor = mysql_conn.cursor()
-    target_table = source_table = tablename
-    if source_db_type.upper() == 'ORACLE':
-        get_column_length = 'select count(*) from user_tab_columns where table_name= ' + "'" + source_table.upper() + "'"  # 拼接获取源表有多少个列的SQL
-    # lock.acquire()
-    cur_select.execute(get_column_length)  # 执行
-    col_len = cur_select.fetchone()
-    # col_len = oracle_cursor.fetch_one(get_column_length)  # 获取源表有多少个列
-    col_len = col_len[0]  # 将游标结果数组的值赋值，该值为表列字段总数
-    val_str = ''  # 用于生成批量插入的列字段变量
-    if target_db_type.upper() == 'MYSQL':
-        for i in range(1, col_len):
-            val_str = val_str + '%s' + ','
-        val_str = val_str + '%s'  # MySQL批量插入语法是 insert into tb_name values(%s,%s,%s,%s)
-    elif target_db_type.upper() == 'ORACLE':
-        for i in range(1, col_len):
-            val_str = val_str + ':' + str(i) + ','
-        val_str = val_str + ':' + str(col_len)  # Oracle批量插入语法是 insert into tb_name values(:1,:2,:3)
-    insert_sql = 'insert into ' + target_table + ' values(' + val_str + ')'  # 拼接insert into 目标表 values  #目标表插入语句
-    select_sql = 'select * from ' + source_table  # 源查询SQL，如果有where过滤条件，在这里拼接
-    cur_oracle_result.execute(select_sql)  # 执行
-    print("\033[31m正在执行插入表:\033[0m", tablename)
-    print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
-    source_effectrow = 0
-    target_effectrow = 0
-    while True:
-        rows = list(cur_oracle_result.fetchmany(
-            fetch_many_count))  # 每次获取2000行，cur_oracle_result.arraysize值决定，MySQL fetchmany 返回的是 tuple 数据类型 所以用list做类型转换
-        #  print(cur_oracle_result.description)  # 打印Oracle查询结果集字段列表以及类型
-        try:
-            mysql_cursor.executemany(insert_sql, rows)  # 批量插入每次5000行，需要注意的是 rows 必须是 list [] 数据类型
-            # mysql_cursor.executemany(insert_sql, rows)
-            # mysql_conn.commit() 对于连接池，这里需要显式提交
-            # target_db.commit()  # 提交
-        except Exception as e:
-            print(traceback.format_exc())  # 遇到异常记录到log，会继续迁移下张表
-            #  print(tablename, '表记录', rows, '插入失败') 插入失败时输出insert语句
-            print_insert_failed_table(tablename)
-            filename = '/tmp/ddl_failed_table.log'
-            f = open(filename, 'a', encoding='utf-8')
-            f.write('/' + '*' * 50 + 'INSERT ERROR' + '*' * 50 + '/\n')
-            f.write(insert_sql + '\n\n\n')
-            f.close()
-            sql_insert_error = traceback.format_exc()
-            logging.error(sql_insert_error)  # 插入失败的sql语句输出到文件/tmp/ddl_failed_table.log
-
-        if not rows:
-            break  # 当前表游标获取不到数据之后中断循环，返回到mig_database，可以继续下个表
-        source_effectrow = cur_oracle_result.rowcount  # 计数源表插入的行数
-        target_effectrow = target_effectrow + mysql_cursor.rowcount  # 计数目标表插入的行数
-    print('源表查询总数:', source_effectrow)
-    print('目标插入总数:', target_effectrow)
-    print('插入完成')
-    print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
-    print('\n\n')
-    # lock.release()
+def mig_table():
+    err_count = 0
+    with open("/tmp/table.txt", "r") as f:  # 读取自定义表
+        for table_name in f.readlines():  # 按顺序读取每一个表
+            table_name = table_name.strip('\n').upper()  # 去掉列表中每一个元素的换行符
+            target_table = source_table = table_name
+            try:
+                get_table_count = oracle_cursor.fetch_one("""select count(*) from %s""" % source_table)[0]
+                get_column_length = 'select count(*) from user_tab_columns where table_name= ' + "'" + source_table.upper() + "'"  # 拼接获取源表有多少个列的SQL
+                col_len = oracle_cursor.fetch_one(get_column_length)  # 获取源表有多少个列 oracle连接池
+                col_len = col_len[0]  # 将游标结果数组的值赋值，该值为表列字段总数
+            except Exception as e:
+                print(traceback.format_exc() + '获取源表总数以及列总数失败，请检查是否存在该表或者表名小写！' + table_name)
+                err_count += 1
+                sql_insert_error = traceback.format_exc()
+                filename = '/tmp/insert_failed_table.log'
+                f = open(filename, 'a', encoding='utf-8')
+                f.write('-' * 50 + str(err_count) + ' ' + table_name + ' INSERT ERROR' + '-' * 50 + '\n')
+                f.write(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()) + '\n\n')
+                f.write(sql_insert_error + '\n\n')
+                f.close()
+                logging.error(sql_insert_error)  # 插入失败的sql语句输出到文件/tmp/ddl_failed_table.log
+                mysql_cursor.execute("""insert into my_mig_task_info(table_name, task_start_time,thread,is_success) values ('%s',
+                                    current_timestamp,%s,'CHECK TABLE')""" % (table_name, 100))  # %s占位符的值需要引号包围
+            val_str = ''  # 用于生成批量插入的列字段变量
+            for i in range(1, col_len):
+                val_str = val_str + '%s' + ','
+            val_str = val_str + '%s'  # MySQL批量插入语法是 insert into tb_name values(%s,%s,%s,%s)
+            insert_sql = 'insert into ' + target_table + ' values(' + val_str + ')'  # 拼接insert into 目标表 values  #目标表插入语句
+            select_sql = 'select * from ' + source_table  # 源查询SQL，如果有where过滤条件，在这里拼接
+            try:
+                cur_oracle_result.execute(select_sql)  # 执行
+                # temp_cur = oracle_cursor.execute_sql(select_sql, 1000)
+            except Exception:
+                print(traceback.format_exc() + '查询Oracle源表数据失败，请检查是否存在该表或者表名小写！\n\n' + table_name)
+            print("正在执行插入表:", table_name)
+            print(datetime.datetime.now())
+            source_effectrow = 0
+            target_effectrow = 0
+            mysql_insert_count = 0
+            sql_insert_error = ''
+            # mig_table = "'" + table_name + "'"
+            # 往MySQL表my_mig_task_info记录开始插入的时间
+            try:
+                mysql_cursor.execute("""insert into my_mig_task_info(table_name, task_start_time,thread) values ('%s',
+                        current_timestamp,%s)""" % (table_name, 100))  # %s占位符的值需要引号包围
+            except Exception:
+                print(traceback.format_exc())
+            while True:
+                rows = list(
+                    cur_oracle_result.fetchmany(
+                        fetch_many_count))
+                # 例如每次获取2000行，cur_oracle_result.arraysize值决定
+                # MySQL fetchmany 返回的是 tuple 数据类型 所以用list做类型转换
+                # print(cur_oracle_result.description)  # 打印Oracle查询结果集字段列表以及类型
+                try:
+                    mysql_cursor.executemany(insert_sql, rows)  # 批量插入每次5000行，需要注意的是 rows 必须是 list [] 数据类型
+                    mysql_insert_count = mysql_insert_count + mysql_cursor.rowcount  # 每次插入的行数
+                    # mysql_conn.commit() 如果连接池没有配置自动提交，否则这里需要显式提交
+                except Exception as e:
+                    err_count += 1
+                    print('\n' + '/* ' + str(e.args) + ' */' + '\n')
+                    # print(traceback.format_exc())  # 遇到异常记录到log，会继续迁移下张表
+                    sql_insert_error = '\n' + '/* ' + str(e.args) + ' */' + '\n'
+                    filename = '/tmp/insert_failed_table.log'
+                    f = open(filename, 'a', encoding='utf-8')
+                    f.write('-' * 50 + str(err_count) + ' ' + table_name + ' INSERT ERROR' + '-' * 50 + '\n')
+                    f.write(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()) + '\n\n')
+                    f.write(insert_sql + '\n\n\n')
+                    f.write(str(rows[0]) + '\n\n')
+                    f.write(sql_insert_error + '\n\n')
+                    f.close()
+                    logging.error(sql_insert_error)  # 插入失败的sql语句输出到文件/tmp/ddl_failed_table.log
+                if get_table_count == 0:
+                    print('\n无数据插入')
+                    # print('\r', str(mysql_insert_count), '/', str(get_table_count), ' ',str(round((mysql_insert_count /
+                    # get_table_count), 2) * 100) + '%', end='',flush=True)  # 实时刷新插入行数
+                if not rows:
+                    break  # 当前表游标获取不到数据之后中断循环，返回到mig_database，可以继续下个表
+                source_effectrow = cur_oracle_result.rowcount  # 计数源表插入的行数
+                target_effectrow = target_effectrow + mysql_cursor.rowcount  # 计数目标表插入的行数
+            print('source_effectrow:' + str(source_effectrow))
+            print('target_effectrow:' + str(target_effectrow))
+            if source_effectrow == target_effectrow:
+                is_success = 'Y'
+            else:
+                is_success = 'N'
+            if sql_insert_error:
+                print('\n' + table_name + '插入失败')
+            else:
+                print('\n' + table_name + '插入完成')
+            try:
+                mysql_cursor.execute("""update my_mig_task_info set task_end_time=current_timestamp, 
+                            source_table_rows=%s,
+                            target_table_rows=%s,
+                            is_success='%s' where table_name='%s'""" % (
+                    source_effectrow, target_effectrow, is_success, table_name))  # 占位符需要引号包围
+            except Exception:
+                print(traceback.format_exc())
+            print('\n\n')
 
 
 # 在MySQL创建表结构以及添加主键
 def create_meta_table():
     output_table_name = []  # 用于存储要迁移的部分表
+    if args.data_only.upper() == 'TRUE':
+        return 1
     if custom_table.upper() == 'TRUE':
         with open("/tmp/table.txt", "r") as f:  # 打开文件
             for line in f:
                 output_table_name.append(list(line.strip('\n').upper().split(',')))
     else:
-        tableoutput_sql = 'select table_name from user_tables  order by table_name  desc'  # 查询需要导出的表
+        tableoutput_sql = """select table_name from user_tables  order by table_name  desc"""  # 查询需要导出的表
         output_table_name = oracle_cursor.fetch_all(tableoutput_sql)
     global all_table_count  # 将oracle源表总数存入全局变量
     all_table_count = len(output_table_name)  # 无论是自定义表还是全库，都可以存入全局变量
@@ -1105,6 +1184,8 @@ def create_meta_table():
 
 def mig_table_task(list_index):
     err_count = 0
+    if args.data_only.upper() == 'TRUE':
+        return 1
     if list_index == 0:  # 以下为每个任务单独创建连接
         source_db0 = cx_Oracle.connect(ora_conn)
         cur_oracle_result = source_db0.cursor()  # 查询Oracle源表的游标结果集
@@ -1123,17 +1204,32 @@ def mig_table_task(list_index):
         mysql_con1 = configDB.MySQLPOOL.connection()
         mysql_cursor = mysql_con1.cursor()  # MySQL连接池
         mysql_cursor.arraysize = row_batch_size
-
+    # print('游标arraysize:' + str(mysql_cursor.arraysize))
     task_starttime = datetime.datetime.now()
     for v_table_name in new_list[0][int(list_index)]:
         table_name = v_table_name
-        print('#' * 50 + '开始迁移表' + table_name + ' thread ' + str(list_index) + '#' * 50)
-        print('THREAD ' + str(list_index) + ' ' + str(datetime.datetime.now()) + ' \n')
+        print('\n正在迁移表' + table_name + ' thread ' + str(list_index) + ' ' + str(datetime.datetime.now()))
+        # print('THREAD ' + str(list_index) + ' ' + str(datetime.datetime.now()) + ' \n')
         target_table = source_table = table_name
-        get_table_count = oracle_cursor.fetch_one("""select count(*) from %s""" % source_table)[0]
-        get_column_length = 'select count(*) from user_tab_columns where table_name= ' + "'" + source_table.upper() + "'"  # 拼接获取源表有多少个列的SQL
-        col_len = oracle_cursor.fetch_one(get_column_length)  # 获取源表有多少个列 oracle连接池
-        col_len = col_len[0]  # 将游标结果数组的值赋值，该值为表列字段总数
+        try:
+            get_table_count = oracle_cursor.fetch_one("""select count(*) from %s""" % source_table)[0]
+            get_column_length = 'select count(*) from user_tab_columns where table_name= ' + "'" + source_table.upper() + "'"  # 拼接获取源表有多少个列的SQL
+            col_len = oracle_cursor.fetch_one(get_column_length)  # 获取源表有多少个列 oracle连接池
+            col_len = col_len[0]  # 将游标结果数组的值赋值，该值为表列字段总数
+        except Exception as e:
+            print(traceback.format_exc() + '获取源表总数以及列总数失败，请检查是否存在该表或者表名小写！' + table_name)
+            err_count += 1
+            sql_insert_error = traceback.format_exc()
+            filename = '/tmp/insert_failed_table.log'
+            f = open(filename, 'a', encoding='utf-8')
+            f.write('-' * 50 + str(err_count) + ' ' + table_name + ' INSERT ERROR' + '-' * 50 + '\n')
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()) + '\n\n')
+            f.write(sql_insert_error + '\n\n')
+            f.close()
+            logging.error(sql_insert_error)  # 插入失败的sql语句输出到文件/tmp/ddl_failed_table.log
+            mysql_cursor.execute("""insert into my_mig_task_info(table_name, task_start_time,thread,is_success) values ('%s',
+                    current_timestamp,%s,'CHECK TABLE')""" % (table_name, list_index))  # %s占位符的值需要引号包围
+            continue  # 这里需要显式指定continue，否则表不存在或者其他问题，会直接跳出for循环
         val_str = ''  # 用于生成批量插入的列字段变量
         for i in range(1, col_len):
             val_str = val_str + '%s' + ','
@@ -1144,10 +1240,9 @@ def mig_table_task(list_index):
             cur_oracle_result.execute(select_sql)  # 执行
             # temp_cur = oracle_cursor.execute_sql(select_sql, 1000)
         except Exception:
-            print('查询Oracle源表失败，请检查连接！\n\n')
-            print(traceback.format_exc())
-            break
-        print("正在执行插入表:", table_name)
+            print(traceback.format_exc() + '查询Oracle源表数据失败，请检查是否存在该表或者表名小写！\n\n' + table_name)
+            continue  # 这里需要显式指定continue，否则某张表不存在就会跳出此函数
+        # print("正在执行插入表:", table_name)
         # print(datetime.datetime.now())
         source_effectrow = 0
         target_effectrow = 0
@@ -1199,9 +1294,9 @@ def mig_table_task(list_index):
         else:
             is_success = 'N'
         if sql_insert_error:
-            print('插入失败')
+            print('\n' + table_name + '插入失败')
         else:
-            print('插入完成')
+            print('\n' + table_name + '插入完成')
         try:
             mysql_cursor.execute("""update my_mig_task_info set task_end_time=current_timestamp, 
             source_table_rows=%s,
@@ -1216,15 +1311,17 @@ def mig_table_task(list_index):
         print('\n\n')
     task_endtime = datetime.datetime.now()
     task_exec_time = str((task_endtime - task_starttime).seconds)
-    print("第" + str(list_index) + "部分的表\n" + "开始时间:" + str(task_starttime) + '\n' + "结束时间:" + str(
-        task_endtime) + '\n' + "消耗时间:" + task_exec_time + "秒\n")
-    print('第' + str(list_index) + '部分表迁移完成\n\n\n')
+    # print("第" + str(list_index) + "部分的表\n" + "开始时间:" + str(task_starttime) + '\n' + "结束时间:" + str(
+    #     task_endtime) + '\n' + "消耗时间:" + task_exec_time + "秒\n")
+    # print('第' + str(list_index) + '部分表迁移完成\n\n\n')
 
 
 def async_work():  # 异步不阻塞方式同时插入表
+    if args.data_only.upper() == 'TRUE':
+        return 1
     print('#' * 50 + '开始数据迁移' + '#' * 50 + '\n')
     begin_time = datetime.datetime.now()
-    index = ['0', '1']  # 任务序列
+    index = ['0', '1', '2', '3']  # 任务序列
     csv_file = open("/tmp/insert_table.csv", 'w', newline='')
     writer = csv.writer(csv_file)
     writer.writerow(('TABLE_NAME', 'TASK_START_TIME', 'TASK_END_TIME', 'THREAD', 'RUN_TIME', 'TOTAL_ROWS', 'INSERT_ROWS'
@@ -1234,9 +1331,9 @@ def async_work():  # 异步不阻塞方式同时插入表
     mysql_cursor.execute("""drop table if exists my_mig_task_info""")
     mysql_cursor.execute("""create table my_mig_task_info(table_name varchar(100),task_start_time datetime,
         task_end_time datetime ,thread int,run_time int,source_table_rows int,target_table_rows int,
-        is_success varchar(10))""")
+        is_success varchar(100))""")
     # 生成异步任务并开启
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         task = {executor.submit(mig_table_task, v_index): v_index for v_index in index}
         for future in concurrent.futures.as_completed(task):
             task_name = task[future]
@@ -1245,8 +1342,9 @@ def async_work():  # 异步不阻塞方式同时插入表
             except Exception as exc:
                 print('%r generated an exception: %s' % (task_name, exc))
             else:
-                print('Thread Job ' + str(task_name) + ' Is Done:' + str(data))
-                print('-' * 50 + '\n')
+                print(str(task_name))
+                # print('Thread Job ' + str(task_name) + ' Is Done:' + str(data))
+                # print('-' * 50 + '\n')
     end_time = datetime.datetime.now()
     print('表数据迁移耗时：' + str((end_time - begin_time).seconds) + '\n')
     print('#' * 50 + '表数据插入完成' + '#' * 50 + '\n')
@@ -1385,10 +1483,12 @@ if __name__ == '__main__':
     clean_log()  # 清理上次迁移的log
     create_meta_table()  # 创建表结构单线程
     split_success_list()  # 把创建成功的表分成2个list
-    # create_table_main_process()  # 并行创建表
+    # create_table_main_process()  # 并行创建表,nouse
+    # mig_table_task(0)
+    async_work()  # 异步2个线程迁移数据
+    mig_table()
     create_meta_constraint()  # 创建主键约束以及索引
     create_meta_foreignkey()  # 创建外键约束
-    async_work()  # 异步2个线程迁移数据
     auto_increament_col()  # 增加自增列
     create_view()  # 创建视图
     create_comment()  # 添加注释
