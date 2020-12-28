@@ -2,7 +2,7 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.5.4
+# V1.5.5
 import argparse
 import textwrap
 import cx_Oracle
@@ -224,9 +224,13 @@ def print_source_info():
         print('源存储过程总计: ' + str(source_procedure_count))
         print('源数据库函数总计: ' + str(source_function_count))
         print('源数据库包总计: ' + str(source_package_count))
-    print('目标数据库连接信息: ' + 'ip:' + str(mysql_info['host']) + ':' + str(mysql_info['port']) + ' 数据库名称: ' + str(
+    print('\n目标数据库连接信息: ' + 'ip:' + str(mysql_info['host']) + ':' + str(mysql_info['port']) + ' 数据库名称: ' + str(
         mysql_info['database']))
-    # {'host': '172.16.4.81', 'port': 3306, 'user': 'root', 'password': 'Gepoint', 'database': 'test', 'charset': 'utf8mb4'}
+    is_continue = input('\n是否准备迁移数据：Y|N\n')
+    if is_continue == 'Y' or is_continue == 'y':
+        print('开始迁移数据')  # continue
+    else:
+        sys.exit()
 
 
 # 获取Oracle的主键字段
@@ -999,6 +1003,8 @@ def print_insert_failed_table(table_name):
 # 批量将Oracle数据插入到MySQL的方法,之前是调用该函数串行迁移表，现在是异步，async_work来去取代
 def mig_table():
     err_count = 0
+    if args.data_only.upper() == 'FALSE':
+        return 1
     with open("/tmp/table.txt", "r") as f:  # 读取自定义表
         for table_name in f.readlines():  # 按顺序读取每一个表
             table_name = table_name.strip('\n').upper()  # 去掉列表中每一个元素的换行符
