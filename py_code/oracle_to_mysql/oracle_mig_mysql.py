@@ -2,7 +2,7 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.5.5
+# V1.5.6
 import argparse
 import textwrap
 import cx_Oracle
@@ -270,10 +270,10 @@ def tbl_columns(table_name):
         '''
         # 对游标cur_tbl_columns中每行的column[0-8]各字段进行层级判断
         # 字符类型映射规则，字符串类型映射为MySQL类型varchar(n)
-        if column[1] == 'VARCHAR2' or column[1] == 'CHAR' or column[1] == 'NCHAR' or column[1] == 'NVARCHAR2':
+        if column[1] == 'VARCHAR2' or column[1] == 'NVARCHAR2':
             #  由于MySQL创建表的时候除了大字段，所有列长度不能大于64k，为了转换方便，如果Oracle字符串长度大于等于1000映射为MySQL的tinytext
             #  由于MySQL大字段不能有默认值，所以这里的默认值都统一为null
-            if column[2] >= 10000:
+            if column[2] >= 10000:  # 此处设定了一个大值，目的是对此条件不生效，即这条规则当前弃用
                 result.append({'fieldname': column[0],  # 如下为字段的属性值
                                'type': 'TINYTEXT',  # 列字段类型以及长度范围
                                'primary': column[0],  # 如果有主键字段返回true，否则false
@@ -312,6 +312,16 @@ def tbl_columns(table_name):
                                'comment': column[6]
                                }
                               )
+        # 字符类型映射规则，字符串类型映射为MySQL类型char(n)
+        elif column[1] == 'CHAR' or column[1] == 'NCHAR':
+            result.append({'fieldname': column[0],  # 如下为字段的属性值
+                           'type': 'CHAR' + '(' + str(column[2]) + ')',  # 列字段类型以及长度范围
+                           'primary': column[0],  # 如果有主键字段返回true，否则false
+                           'default': column[7],  # 字段默认值
+                           'isnull': column[5],  # 字段是否允许为空，true为允许，否则为false
+                           'comment': column[6]
+                           }
+                          )
 
         # 时间日期类型映射规则，Oracle date类型映射为MySQL类型datetime
         elif column[1] == 'DATE' or column[1] == 'TIMESTAMP(6)' or column[1] == 'TIMESTAMP(0)':
