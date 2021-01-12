@@ -2,7 +2,7 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.5.6
+# V1.5.7
 import argparse
 import textwrap
 import cx_Oracle
@@ -40,7 +40,7 @@ class Logger(object):
         pass
 
 
-parser = argparse.ArgumentParser(prog='oracle_mig_mysql',
+parser = argparse.ArgumentParser(prog='oracle_mig_mysql V1.5.7',
                                  formatter_class=argparse.RawDescriptionHelpFormatter,
                                  description=textwrap.dedent('''\
 EXAMPLE:
@@ -1202,7 +1202,8 @@ def mig_table_task(list_index):
     err_count = 0
     if args.data_only.upper() == 'TRUE':
         return 1
-    if list_index == 0:  # 以下为每个任务单独创建连接
+    list_number = ['0', '1', '2', '3']
+    if list_index in list_number:
         source_db0 = cx_Oracle.connect(ora_conn)
         cur_oracle_result = source_db0.cursor()  # 查询Oracle源表的游标结果集
         cur_oracle_result.outputtypehandler = dataconvert
@@ -1210,15 +1211,6 @@ def mig_table_task(list_index):
         cur_oracle_result.arraysize = row_batch_size  # Oracle数据库游标对象结果集返回的行数即每次获取多少行
         mysql_con0 = configDB.MySQLPOOL.connection()
         mysql_cursor = mysql_con0.cursor()  # MySQL连接池
-        mysql_cursor.arraysize = row_batch_size
-    else:
-        source_db1 = cx_Oracle.connect(ora_conn)
-        cur_oracle_result = source_db1.cursor()  # 查询Oracle源表的游标结果集
-        cur_oracle_result.outputtypehandler = dataconvert
-        cur_oracle_result.prefetchrows = row_batch_size
-        cur_oracle_result.arraysize = row_batch_size  # Oracle数据库游标对象结果集返回的行数即每次获取多少行
-        mysql_con1 = configDB.MySQLPOOL.connection()
-        mysql_cursor = mysql_con1.cursor()  # MySQL连接池
         mysql_cursor.arraysize = row_batch_size
     # print('游标arraysize:' + str(mysql_cursor.arraysize))
     task_starttime = datetime.datetime.now()
