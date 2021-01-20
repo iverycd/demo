@@ -2,7 +2,7 @@
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
 # CURRENT VERSION
-# V1.5.7
+# V1.5.8
 import argparse
 import textwrap
 import cx_Oracle
@@ -22,6 +22,7 @@ import configDB  # 引用配置文件以及产生连接池
 
 # from multiprocessing.dummy import Pool as ThreadPool
 # import threading
+
 # from threading import Thread # 多线程
 # from multiprocessing import Process  # 下面用了动态变量执行多进程，所以这里是灰色
 
@@ -40,16 +41,23 @@ class Logger(object):
         pass
 
 
-parser = argparse.ArgumentParser(prog='oracle_mig_mysql V1.5.7',
+parser = argparse.ArgumentParser(prog='oracle_mig_mysql',
                                  formatter_class=argparse.RawDescriptionHelpFormatter,
                                  description=textwrap.dedent('''\
+VERSION:
+V1.5.8
+
 EXAMPLE:
-    eg(1):perform migration fetch and insert 10000 rows data into table:\n ./oracle_to_mysql -b 10000\n
-    eg(2):perform custom table migration to MySQL:\n ./oracle_to_mysql -c true'''))
-parser.add_argument('--batch_size', '-b', help='fetch and insert row size,default 10000', type=int)
-parser.add_argument('--custom_table', '-c', help='mig some tables not all tables into MySQL,default false',
+    EG(1):RUN MIGRATION FETCH AND INSERT 10000 ROWS DATA INTO TABLE:\n ./oracle_to_mysql -b 10000\n
+    EG(2):RUN IMPORT CUSTOM TABLE MIGRATION TO MySQL INCLUDE METADATA AND DATA ROWS:\n ./oracle_to_mysql -c true\n
+    EG(3):NEED TO CREATE TARGET TABLE BEFORE RUN,THIS ONLY MIG TABLE DATA ROWS,INDEX,TRIGGER:\n ./oracle_to_mysql -c true -d true
+    
+    '''))
+parser.add_argument('--batch_size', '-b', help='FETCH AND INSERT ROW SIZE,DEFAULT 10000', type=int)
+parser.add_argument('--custom_table', '-c', help='MIG CUSTOM TABLES INTO MySQL,DEFAULT FALSE',
                     choices=['true', 'false'], default='false')  # 默认是全表迁移
-parser.add_argument('--data_only', '-d', help='mig only data row', choices=['true', 'false'], default='false')
+parser.add_argument('--data_only', '-d', help='MIG ONLY DATA ROW DO NOT CREATE TABLE', choices=['true', 'false'],
+                    default='false')
 args = parser.parse_args()
 
 # 判断命令行参数-b是否指定
@@ -101,9 +109,13 @@ view_failed_result = []  # 用于记录ddl创建失败的视图名称
 oracle_autocol_total = []  # 用于统计Oracle中自增列的总数
 all_inc_col_success_count = 0  # mysql中自增列成功的总数
 all_inc_col_failed_count = 0  # mysql中自增列失败的总数
-all_constraints_count = 0  # 约束以及索引总数
+normal_trigger_count = 0  # 用于统计Oracle中触发器（排除序列相关触发器）的总数
+trigger_success_count = 0  # mysql中触发器创建成功的总数
+trigger_failed_count = 0  # mysql中触发器创建失败的总数
+all_constraints_count = 0  # 约束以及索引总数（排除掉非normal index）
 all_constraints_success_count = 0  # mysql中创建约束以及索引成功的总数
 constraint_failed_count = []  # 用于统计主键以及索引创建失败的总数
+function_based_index_count = 0  # 非normal索引总数
 all_fk_count = 0  # 外键总数
 all_fk_success_count = 0  # mysql中外键创建成功的总数
 foreignkey_failed_count = []  # 用于统计外键创建失败的总数
@@ -626,41 +638,44 @@ def create_meta_foreignkey():
     else:  # 创建全部外键
         table_foreign_key = 'select table_name from USER_CONSTRAINTS where CONSTRAINT_TYPE= \'R\''
         fk_table = oracle_cursor.fetch_all(table_foreign_key)
-    for v_result_table in fk_table:  # 获得一张表创建外键的拼接语句，按照每张表顺序来创建外键
-        table_name = v_result_table[0]
-        all_foreign_key = oracle_cursor.fetch_all("""SELECT 'ALTER TABLE ' || B.TABLE_NAME || ' ADD CONSTRAINT ' ||
-                        B.CONSTRAINT_NAME || ' FOREIGN KEY (' ||
-                        (SELECT TO_CHAR(WMSYS.WM_CONCAT(A.COLUMN_NAME))
-                           FROM USER_CONS_COLUMNS A
-                          WHERE A.CONSTRAINT_NAME = B.CONSTRAINT_NAME) || ') REFERENCES ' ||
-                        (SELECT B1.table_name FROM USER_CONSTRAINTS B1
-                          WHERE B1.CONSTRAINT_NAME = B.R_CONSTRAINT_NAME) || '(' ||
-                        (SELECT TO_CHAR(WMSYS.WM_CONCAT(A.COLUMN_NAME))
-                           FROM USER_CONS_COLUMNS A
-                          WHERE A.CONSTRAINT_NAME = B.R_CONSTRAINT_NAME) || ');'
-                   FROM USER_CONSTRAINTS B
-                  WHERE B.CONSTRAINT_TYPE = 'R' and TABLE_NAME='%s'""" % table_name)
-        for e in all_foreign_key:  # 根据上面的查询结果集，创建外键
-            create_foreign_key_sql = e[0]
-            print(create_foreign_key_sql)
-            all_fk_count += 1  # 外键总数
-            try:
-                mysql_cursor.execute(create_foreign_key_sql)
-                print('外键创建完毕\n')
-                all_fk_success_count += 1
-            except Exception as e:
-                fk_err_count += 1
-                foreignkey_failed_count.append('1')  # 外键创建失败就往list对象存1
-                print('\n' + '/* ' + str(e.args) + ' */' + '\n')
-                print('外键创建失败请检查ddl语句!\n')
-                # print(traceback.format_exc())
-                filename = '/tmp/ddl_failed_table.log'
-                f = open(filename, 'a', encoding='utf-8')
-                f.write('-' * 50 + str(fk_err_count) + ' FOREIGNKEY CREATE ERROR' + '-' * 50 + '\n')
-                f.write(create_foreign_key_sql + '\n\n\n')
-                f.close()
-                ddl_foreignkey_error = '\n' + '/* ' + str(e.args) + ' */' + '\n'
-                logging.error(ddl_foreignkey_error)  # 外键创建失败的sql语句输出到文件/tmp/ddl_failed_table.log
+    if len(fk_table) > 0:
+        print('开始创建外键')
+        for v_result_table in fk_table:  # 获得一张表创建外键的拼接语句，按照每张表顺序来创建外键
+            table_name = v_result_table[0]
+            all_foreign_key = oracle_cursor.fetch_all("""SELECT 'ALTER TABLE ' || B.TABLE_NAME || ' ADD CONSTRAINT ' ||
+                            B.CONSTRAINT_NAME || ' FOREIGN KEY (' ||
+                            (SELECT TO_CHAR(WMSYS.WM_CONCAT(A.COLUMN_NAME))
+                               FROM USER_CONS_COLUMNS A
+                              WHERE A.CONSTRAINT_NAME = B.CONSTRAINT_NAME) || ') REFERENCES ' ||
+                            (SELECT B1.table_name FROM USER_CONSTRAINTS B1
+                              WHERE B1.CONSTRAINT_NAME = B.R_CONSTRAINT_NAME) || '(' ||
+                            (SELECT TO_CHAR(WMSYS.WM_CONCAT(A.COLUMN_NAME))
+                               FROM USER_CONS_COLUMNS A
+                              WHERE A.CONSTRAINT_NAME = B.R_CONSTRAINT_NAME) || ');'
+                       FROM USER_CONSTRAINTS B
+                      WHERE B.CONSTRAINT_TYPE = 'R' and TABLE_NAME='%s'""" % table_name)
+            for e in all_foreign_key:  # 根据上面的查询结果集，创建外键
+                create_foreign_key_sql = e[0]
+                print(create_foreign_key_sql)
+                all_fk_count += 1  # 外键总数
+                try:
+                    mysql_cursor.execute(create_foreign_key_sql)
+                    print('外键创建完毕\n')
+                    all_fk_success_count += 1
+                except Exception as e:
+                    fk_err_count += 1
+                    foreignkey_failed_count.append('1')  # 外键创建失败就往list对象存1
+                    print('\n' + '/* ' + str(e.args) + ' */' + '\n')
+                    print('外键创建失败请检查ddl语句!\n')
+                    # print(traceback.format_exc())
+                    filename = '/tmp/ddl_failed_table.log'
+                    f = open(filename, 'a', encoding='utf-8')
+                    f.write('\n-- ' + ' FOREIGNKEY CREATE ERROR ' + str(fk_err_count) + '\n')
+                    f.write(create_foreign_key_sql + ';\n')
+                    f.write('\n' + '/* ' + str(e.args) + ' */' + '\n')
+                    f.close()
+    else:
+        print('没有外键约束')
     print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
     end_time = datetime.datetime.now()
     print('创建外键耗时： ' + str((end_time - begin_time).seconds))
@@ -669,14 +684,20 @@ def create_meta_foreignkey():
 
 # 批量创建主键以及索引
 def create_meta_constraint():
-    global all_constraints_count  # mysql中约束以及索引总数
+    global all_constraints_count  # 约束以及索引总数
     global all_constraints_success_count  # mysql中约束以及索引创建成功的计数
+    global function_based_index_count  # function_based_index总数
+    function_based_index = []
+    user_name = oracle_cursor.fetch_one("""select user from dual""")
+    user_name = user_name[0]
     err_count = 0
     output_table_name = []  # 迁移部分表
+    create_index = ''
     all_index = []  # 存储执行创建约束的结果集
     start_time = datetime.datetime.now()
     print('#' * 50 + '开始创建' + '约束以及索引 ' + '#' * 50)
     print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+    # 以下是创建 NORMAL的主键以及普通索引
     if custom_table.upper() == 'TRUE':  # 如果命令行参数有-c选项，仅创建部分约束
         with open("/tmp/table.txt", "r") as f:  # 读取自定义表
             for line in f:
@@ -710,6 +731,7 @@ def create_meta_constraint():
                  WHERE T.INDEX_NAME = I.INDEX_NAME
                    AND T.INDEX_NAME = C.CONSTRAINT_NAME(+)
                    AND T.TABLE_NAME = '%s'
+                   and i.index_type != 'FUNCTION-BASED NORMAL'
                  GROUP BY T.TABLE_NAME,
                           T.INDEX_NAME,
                           I.UNIQUENESS,
@@ -745,32 +767,71 @@ def create_meta_constraint():
               FROM USER_IND_COLUMNS T, USER_INDEXES I, USER_CONSTRAINTS C
              WHERE T.INDEX_NAME = I.INDEX_NAME
                AND T.INDEX_NAME = C.CONSTRAINT_NAME(+)
+               and i.index_type != 'FUNCTION-BASED NORMAL'
              GROUP BY T.TABLE_NAME,
                       T.INDEX_NAME,
                       I.UNIQUENESS,
                       I.INDEX_TYPE,
                       C.CONSTRAINT_TYPE""")  # 如果要每张表查使用T.TABLE_NAME = '%s',%s传进去是没有单引号，所以需要用单引号号包围
     all_constraints_count = len(all_index)
-    for d in all_index:
-        create_index_sql = d[0].read()  # 用read读取大对象，否则会报错
-        print(create_index_sql)
-        try:
-            mysql_cursor.execute(create_index_sql)
-            print('约束以及索引创建完毕\n')
+    if all_constraints_count > 0:
+        print('开始创建normal index：\n')
+        for d in all_index:
+            create_index_sql = d[0].read()  # 用read读取大对象，否则会报错
+            print(create_index_sql)
+            try:
+                mysql_cursor.execute(create_index_sql)
+                print('约束以及索引创建完毕\n')
+                all_constraints_success_count += 1
+            except Exception as e:
+                err_count += 1
+                constraint_failed_count.append('1')  # 用来统计主键或者索引创建失败的计数，只要创建失败就往list存1
+                print('\n' + '/* ' + str(e.args) + ' */' + '\n')
+                print('约束或者索引创建失败请检查ddl语句!\n')
+                filename = '/tmp/ddl_failed_table.log'
+                f = open(filename, 'a', encoding='utf-8')
+                f.write('\n-- ' + str(err_count) + ' CONSTRAINTS CREATE ERROR' + '\n')
+                f.write(create_index_sql + ';\n\n\n')
+                f.write('\n' + '/* ' + str(e.args) + ' */' + '\n')
+                f.close()
+    else:
+        print('没有normal index需要创建')
+    # 以下是创建非normal索引
+    if custom_table.upper() == 'TRUE':  # 如果命令行参数有-c选项，仅创建部分约束
+        for v_custom_table in output_table_name:  # 读取第N个表
+            function_index = oracle_cursor.fetch_all(
+                """Select index_name from user_indexes where index_type='FUNCTION-BASED NORMAL' and table_name ='%s'""" %
+                v_custom_table[0])  # 根据第N个表，获取所有所有名称
+            for v_out0 in function_index:  # 将上述获取的若干索引名称一一存入list
+                function_based_index.append(v_out0)
+    else:  # 查询所有表的索引名称
+        function_based_index = oracle_cursor.fetch_all(
+            """Select index_name from user_indexes where index_type='FUNCTION-BASED NORMAL'""")
+    function_based_index_count = len(function_based_index)  # 如果有非normal索引
+    if function_based_index_count > 0:
+        print('开始创建非normal index：\n')
+    for v_function_based_index in function_based_index:
+        fun_index_name = v_function_based_index[0]
+        try:  # 下面是生成非normal索引的拼接sql，来源于dbms_metadata.get_ddl
+            create_index = oracle_cursor.fetch_one(
+                """select trim(replace(regexp_replace(regexp_replace(SUBSTR(upper(to_char(dbms_metadata.get_ddl('INDEX','%s','%s'))), 1, INSTR(upper(to_char(dbms_metadata.get_ddl('INDEX','%s','%s'))), ' PCTFREE')-1),'"','',1,0,'i'),'%s'||'.','',1,0,'i'),chr(10),'')) from dual""" % (
+                    fun_index_name, user_name, fun_index_name, user_name, user_name))
+            create_index = create_index[0]
+            print(create_index)
+            mysql_cursor.execute(create_index)
+            print('success\n')
             all_constraints_success_count += 1
         except Exception as e:
             err_count += 1
-            constraint_failed_count.append('1')  # 用来统计主键或者索引创建失败的计数，只要创建失败就往list存1
+            constraint_failed_count.append('1')
             print('\n' + '/* ' + str(e.args) + ' */' + '\n')
-            print('约束或者索引创建失败请检查ddl语句!\n')
-            # print(traceback.format_exc())
+            print('非NORMAL索引创建失败请检查ddl语句!\n')
             filename = '/tmp/ddl_failed_table.log'
             f = open(filename, 'a', encoding='utf-8')
-            f.write('-' * 50 + str(err_count) + ' CONSTRAINTS CREATE ERROR' + '-' * 50 + '\n')
-            f.write(create_index_sql + '\n\n\n')
+            f.write('\n-- ' + 'NON NORMAL INDEX CREATE ERROR ' + str(err_count) + '\n')
+            f.write(create_index + ';\n')
+            f.write('\n' + '/* ' + str(e.args) + ' */' + '\n')
             f.close()
-            constraint_error_table = '\n' + '/* ' + str(e.args) + ' */' + '\n'  # 这里记下索引创建失败的sql在 ddl_failed_table.log
-            logging.error(constraint_error_table)  # ddl创建失败的sql语句输出到文件/tmp/constraint_error_table.log
     print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
     end_time = datetime.datetime.now()
     print('创建约束以及索引耗时： ' + str((end_time - start_time).seconds))
@@ -778,11 +839,18 @@ def create_meta_constraint():
 
 
 # 查找具有自增特性的表以及字段名称
-def auto_increament_col():
+def create_trigger_col():
     global all_inc_col_success_count
     global all_inc_col_failed_count
+    global normal_trigger_count  # 用于统计oracle触发器（排除掉序列相关触发器）的总数
+    global trigger_success_count  # mysql中触发器创建成功的总数
+    global trigger_failed_count  # mysql中触发器创建失败的总数
+    normal_trigger = []  # 用于存自定义表读取之后的触发器名称
+    create_trigger = ''  # 触发器创建的sql
     count_1 = 0  # 自增列索引创建失败的计数
     start_time = datetime.datetime.now()
+    user_name = oracle_cursor.fetch_one("""select user from dual""")
+    user_name = user_name[0]
     # Oracle中无法对long类型数据截取，创建用于存储触发器字段信息的临时表TRIGGER_NAME
     count_num_tri = oracle_cursor.fetch_one("""select count(*) from user_tables where table_name='TRIGGER_NAME'""")[
         0]
@@ -795,7 +863,7 @@ def auto_increament_col():
     else:
         try:
             oracle_cursor.execute_sql(
-                """create table trigger_name (table_name varchar2(200),trigger_body clob)""")
+                """create table trigger_name (table_name varchar2(200),trigger_type varchar2(100),trigger_body clob)""")
         except Exception:
             print(traceback.format_exc())
             print('无法在Oracle创建用于触发器的表')
@@ -807,7 +875,7 @@ def auto_increament_col():
                 # Oracle中无法对long类型数据截取，创建用于存储触发器字段信息的临时表TRIGGER_NAME
                 try:  # 按照每张表，将单张表结果集插入到trigger_name
                     oracle_cursor.execute_sql(
-                        """insert into trigger_name select table_name ,to_lob(trigger_body) from user_triggers where  table_name= '%s'  """ % table_name)
+                        """insert into trigger_name select table_name ,trigger_type,to_lob(trigger_body) from user_triggers where table_name= '%s'  """ % table_name)
                 except Exception:
                     print(traceback.format_exc())
                     print('无法在Oracle插入存放触发器的数据')
@@ -815,65 +883,114 @@ def auto_increament_col():
         try:
             oracle_cursor.execute_sql("""truncate table trigger_name""")
             oracle_cursor.execute_sql(
-                """insert into trigger_name select table_name ,to_lob(trigger_body) from user_triggers""")
+                """insert into trigger_name select table_name ,trigger_type,to_lob(trigger_body) from user_triggers""")
         except Exception:
             print(traceback.format_exc())
             print('无法在Oracle插入存放触发器的数据')
     all_create_index = oracle_cursor.fetch_all(
-        """select 'create  index ids_'||substr(table_name,1,26)||' on '||table_name||'('||upper(substr(substr(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.')), 1, instr(upper(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.'))), ' FROM DUAL;') - 1), 5)) ||');' as sql_create from trigger_name where instr(upper(trigger_body), 'NEXTVAL')>0""")  # 在Oracle拼接sql生成用于在MySQL中自增列的索引
-    print('创建用于自增列的索引:\n ')
-    print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
-    for v_increa_index in all_create_index:
-        create_autoincrea_index = v_increa_index[0].read()  # 用read读取大字段，否则无法执行
-        print(create_autoincrea_index)
-        try:
-            mysql_cursor.execute(create_autoincrea_index)
-        except Exception as e:
-            count_1 += 1
-            print('\n' + '/* ' + str(e.args) + ' */' + '\n')
-            print('用于自增列的索引创建失败，请检查源触发器！\n')
-            # print(traceback.format_exc())
-            filename = '/tmp/ddl_failed_table.log'
-            f = open(filename, 'a', encoding='utf-8')
-            f.write('-' * 50 + str(count_1) + ' AUTO_COL INDEX CREATE ERROR' + '-' * 50 + '\n')
-            f.write(create_autoincrea_index + '\n\n\n')
-            f.close()
-            ddl_incindex_error = '\n' + '/* ' + str(e.args) + ' */' + '\n'
-            logging.error(ddl_incindex_error)  # 自增用索引创建失败的sql语句输出到文件/tmp/ddl_failed_table.log
-    print('自增列索引创建完成 ' + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+        """select 'create  index ids_'||substr(table_name,1,26)||' on '||table_name||'('||upper(substr(substr(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.')), 1, instr(upper(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.'))), ' FROM DUAL;') - 1), 5)) ||');' as sql_create from trigger_name where trigger_type='BEFORE EACH ROW' and instr(upper(trigger_body), 'NEXTVAL')>0""")  # 在Oracle拼接sql生成用于在MySQL中自增列的索引
+    auto_inc_count = len(all_create_index)
+    if auto_inc_count > 0:
+        print('创建用于自增列的索引:\n ')
+        print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+        for v_increa_index in all_create_index:
+            create_autoincrea_index = v_increa_index[0].read()  # 用read读取大字段，否则无法执行
+            print(create_autoincrea_index)
+            try:
+                mysql_cursor.execute(create_autoincrea_index)
+            except Exception as e:
+                count_1 += 1
+                print('\n' + '/* ' + str(e.args) + ' */' + '\n')
+                print('用于自增列的索引创建失败，请检查源触发器！\n')
+                # print(traceback.format_exc())
+                filename = '/tmp/ddl_failed_table.log'
+                f = open(filename, 'a', encoding='utf-8')
+                f.write('-' * 50 + str(count_1) + ' AUTO_COL INDEX CREATE ERROR' + '-' * 50 + '\n')
+                f.write(create_autoincrea_index + '\n\n\n')
+                f.close()
+                ddl_incindex_error = '\n' + '/* ' + str(e.args) + ' */' + '\n'
+                logging.error(ddl_incindex_error)  # 自增用索引创建失败的sql语句输出到文件/tmp/ddl_failed_table.log
+        print('自增列索引创建完成 ' + time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
 
-    print('\n开始修改自增列属性：')
-    print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
-    all_alter_sql = oracle_cursor.fetch_all("""
-    select 'alter table '||table_name||' modify '||upper(substr(substr(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.')), 1, instr(upper(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.'))), ' FROM DUAL;') - 1), 5)) ||' int auto_increment;' from trigger_name where instr(upper(trigger_body), 'NEXTVAL')>0
-    """)
-    for v_increa_col in all_alter_sql:
-        alter_increa_col = v_increa_col[0].read()  # 用read读取大字段，否则无法执行
-        print('\n执行sql alter table：\n')
-        print(alter_increa_col)
-        try:  # 注意下try要在for里面
-            mysql_cursor.execute(alter_increa_col)
-            all_inc_col_success_count += 1
-        except Exception as e:  # 如果有异常打印异常信息，并跳过继续下个自增列修改
-            all_inc_col_failed_count += 1
-            print('\n' + '/* ' + str(e.args) + ' */' + '\n')
-            print('修改自增列失败，请检查源触发器！\n')
-            # print(traceback.format_exc())
-            filename = '/tmp/ddl_failed_table.log'
-            f = open(filename, 'a', encoding='utf-8')
-            f.write('-' * 50 + str(all_inc_col_failed_count) + ' MODIFY AUTO_COL ERROR' + '-' * 50 + '\n')
-            f.write(alter_increa_col + '\n\n\n')
-            f.close()
-            ddl_increa_col_error = '\n' + '/* ' + str(e.args) + ' */' + '\n'
-            logging.error(ddl_increa_col_error)  # 自增用索引创建失败的sql语句输出到文件/tmp/ddl_failed_table.log
-    print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
-    end_time = datetime.datetime.now()
-    print('修改自增列耗时： ' + str((end_time - start_time).seconds))
-    print('#' * 50 + '自增列修改完成' + '#' * 50 + '\n\n\n')
-    oracle_autocol_total.append(
-        oracle_cursor.fetch_one("""select count(*) from trigger_name  where instr(upper(trigger_body), 'NEXTVAL')>0""")[
-            0])  # 将自增列的总数存入list
-    oracle_cursor.execute_sql("""drop table trigger_name purge""")
+        print('\n开始修改自增列属性：')
+        print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+        all_alter_sql = oracle_cursor.fetch_all("""
+            select 'alter table '||table_name||' modify '||upper(substr(substr(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.')), 1, instr(upper(SUBSTR(trigger_body, INSTR(upper(trigger_body), ':NEW.') + 1,length(trigger_body) - instr(trigger_body, ':NEW.'))), ' FROM DUAL;') - 1), 5)) ||' int auto_increment;' from trigger_name where trigger_type='BEFORE EACH ROW' and instr(upper(trigger_body), 'NEXTVAL')>0
+            """)
+        for v_increa_col in all_alter_sql:
+            alter_increa_col = v_increa_col[0].read()  # 用read读取大字段，否则无法执行
+            print('\n执行sql alter table：\n')
+            print(alter_increa_col)
+            try:  # 注意下try要在for里面
+                mysql_cursor.execute(alter_increa_col)
+                all_inc_col_success_count += 1
+            except Exception as e:  # 如果有异常打印异常信息，并跳过继续下个自增列修改
+                all_inc_col_failed_count += 1
+                print('\n' + '/* ' + str(e.args) + ' */' + '\n')
+                print('修改自增列失败，请检查源触发器！\n')
+                # print(traceback.format_exc())
+                filename = '/tmp/ddl_failed_table.log'
+                f = open(filename, 'a', encoding='utf-8')
+                f.write('\n-- ' + ' MODIFY AUTO_COL ERROR ' + str(all_inc_col_failed_count) + '\n')
+                f.write(alter_increa_col + ';\n')
+                f.write('\n' + '/* ' + str(e.args) + ' */' + '\n')
+                f.close()
+        print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
+        end_time = datetime.datetime.now()
+        print('修改自增列耗时： ' + str((end_time - start_time).seconds))
+        print('#' * 50 + '自增列修改完成' + '#' * 50 + '\n\n\n')
+        oracle_autocol_total.append(
+            oracle_cursor.fetch_one(
+                """select count(*) from trigger_name  where trigger_type='BEFORE EACH ROW' and instr(upper(trigger_body), 'NEXTVAL')>0""")[
+                0])  # 将自增列的总数存入list
+    else:
+        print('没有相关自增列需要创建！')
+    oracle_cursor.execute_sql("""drop table trigger_name purge""")  # 删除之前在oracle创建的临时表
+
+    # 以下是创建常规触发器
+    if custom_table.upper() == 'TRUE':  # 如果命令行参数有-c选项，仅创建部分自增列
+        with open("/tmp/table.txt", "r") as f:  # 读取自定义表
+            for table_name in f.readlines():  # 按顺序读取每一个表
+                table_name = table_name.strip('\n').upper()  # 去掉列表中每一个元素的换行符
+                try:
+                    trigger_name = oracle_cursor.fetch_all(
+                        """select trigger_name from user_triggers where trigger_type !='BEFORE EACH ROW' and table_name='%s'""" % table_name)
+                    for v_trt_name in trigger_name:
+                        normal_trigger.append(v_trt_name)
+                except Exception as e:
+                    print(e)
+    else:
+        try:
+            normal_trigger = oracle_cursor.fetch_all(
+                """select trigger_name from user_triggers where trigger_type !='BEFORE EACH ROW'""")
+        except Exception as e:
+            print(e)
+    normal_trigger_count = len(normal_trigger)
+    if normal_trigger_count > 0:
+        print('开始创建NORMAL TRIGGER：\n')
+        for v_normal_trigger in normal_trigger:
+            trigger_name = v_normal_trigger[0]
+            try:
+                create_trigger = oracle_cursor.fetch_one(
+                    """select regexp_replace(regexp_replace(trim(replace(regexp_replace(regexp_replace(SUBSTR(upper(to_char(dbms_metadata.get_ddl('TRIGGER','%s','%s'))), 1, INSTR(upper(to_char(dbms_metadata.get_ddl('TRIGGER','%s','%s'))), 'ALTER TRIGGER')-1),'"','',1,0,'i'),'%s.','',1,0,'i'),chr(10),'')),'OR REPLACE','',1,0,'i'),':','',1,0,'i') from dual""" % (
+                        trigger_name, user_name, trigger_name, user_name, user_name))
+                create_trigger = create_trigger[0]
+                print(create_trigger)
+                print('触发器创建完成\n')
+                mysql_cursor.execute(create_trigger)
+                trigger_success_count += 1
+            except Exception as e:
+                trigger_failed_count += 1
+                print('\n' + '/* ' + str(e.args) + ' */' + '\n')
+                print('常规触发器创建失败请检查ddl语句!\n')
+                filename = '/tmp/ddl_failed_table.log'
+                f = open(filename, 'a', encoding='utf-8')
+                f.write('\n-- ' + ' NORMAL TRIGGER CREATE ERROR' + str(trigger_failed_count) + '\n')
+                f.write(create_trigger + ';\n')
+                f.write('\n' + '/* ' + str(e.args) + ' */' + '\n')
+                f.close()
+    else:
+        print('没有常规触发器\n')
 
 
 # 获取视图定义以及创建
@@ -903,35 +1020,37 @@ def create_view():
             select  view_name,'create view '||view_name||' as '||replace(text, '"'  , '') as view_sql from CONTENT_VIEW
             """)
         all_view_count = len(all_view_create)
-        for e in all_view_create:
-            view_name = e[0]
-            create_view_sql = e[1].read()  # 用read读取大字段，否则无法执行
-            print(create_view_sql)
-            try:
-                # cur_target_constraint.execute("""drop view  if exists %s""" % view_name)
-                # cur_target_constraint.execute(create_view_sql)
-                mysql_cursor.execute("""drop view  if exists %s""" % view_name)
-                mysql_cursor.execute(create_view_sql)
-                print('视图创建完毕\n')
-                all_view_success_count += 1
-            except Exception as e:
-                all_view_failed_count += 1
-                view_failed_result.append(view_name)
-                print('\n' + '/* ' + str(e.args) + ' */' + '\n')
-                print('视图创建失败请检查ddl语句!\n')
-                # print(traceback.format_exc())
-                filename = '/tmp/ddl_failed_table.log'
-                f = open(filename, 'a', encoding='utf-8')
-                f.write('-' * 50 + str(all_view_failed_count) + ' CREATE VIEW ERROR' + '-' * 50 + '\n')
-                f.write(create_view_sql + '\n\n\n')
-                f.close()
-                ddl_view_error = '\n' + '/* ' + str(e.args) + ' */' + '\n'
-                logging.error(ddl_view_error)  # 视图创建失败的sql语句输出到文件/tmp/ddl_failed_table.log
+        if all_view_count > 0:
+            for e in all_view_create:
+                view_name = e[0]
+                create_view_sql = e[1].read()  # 用read读取大字段，否则无法执行
+                print(create_view_sql)
+                try:
+                    # cur_target_constraint.execute("""drop view  if exists %s""" % view_name)
+                    # cur_target_constraint.execute(create_view_sql)
+                    mysql_cursor.execute("""drop view  if exists %s""" % view_name)
+                    mysql_cursor.execute(create_view_sql)
+                    print('视图创建完毕\n')
+                    all_view_success_count += 1
+                except Exception as e:
+                    all_view_failed_count += 1
+                    view_failed_result.append(view_name)
+                    print('\n' + '/* ' + str(e.args) + ' */' + '\n')
+                    print('视图创建失败请检查ddl语句!\n')
+                    # print(traceback.format_exc())
+                    filename = '/tmp/ddl_failed_table.log'
+                    f = open(filename, 'a', encoding='utf-8')
+                    f.write('\n-- ' + ' CREATE VIEW ERROR ' + str(all_view_failed_count) + '\n')
+                    f.write(create_view_sql + ';\n')
+                    f.write('\n' + '/* ' + str(e.args) + ' */' + '\n')
+                    f.close()
+        else:
+            print('没有视图要创建')
         print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
-        print('\033[31m*' * 50 + '视图创建完成' + '*' * 50 + '\033[0m\n\n\n')
-        oracle_cursor.execute_sql("""drop table content_view purge""")
         end_time = datetime.datetime.now()
         print('创建视图耗时: ' + str((end_time - begin_time).seconds))
+        print('\033[31m*' * 50 + '视图创建完成' + '*' * 50 + '\033[0m\n\n\n')
+        oracle_cursor.execute_sql("""drop table content_view purge""")
 
 
 # 数据库对象的comment注释,这里仅包含表的注释，列的注释在上面创建表结构的时候已经包括
@@ -958,28 +1077,30 @@ def create_comment():
             select 'alter table '||TABLE_NAME||' comment '||''''||COMMENTS||'''' as create_comment
          from USER_TAB_COMMENTS where COMMENTS is not null
             """)
-    for e in all_comment_sql:  # 一次性创建注释
-        # table_name = e[0]
-        create_comment_sql = e[0]
-        try:
-            print('正在添加注释:')
-            print(create_comment_sql)
-            # cur_target_constraint.execute(create_comment_sql)
-            mysql_cursor.execute(create_comment_sql)
-            print('comment注释添加完毕\n')
-        except Exception as e:
-            err_count += 1
-            comment_failed_count.append('1')  # comment添加失败就往list对象存1
-            print('\n' + '/* ' + str(e.args) + ' */' + '\n')
-            print('comment添加失败请检查ddl语句!\n')
-            # print(traceback.format_exc())
-            filename = '/tmp/ddl_failed_table.log'
-            f = open(filename, 'a', encoding='utf-8')
-            f.write('-' * 50 + str(err_count) + ' CREATE COMMENT ERROR' + '-' * 50 + '\n')
-            f.write(create_comment_sql + '\n\n\n')
-            f.close()
-            ddl_comment_error = '\n' + '/* ' + str(e.args) + ' */' + '\n'
-            logging.error(ddl_comment_error)  # comment注释创建失败的sql语句输出到文件/tmp/ddl_failed_table.log
+    if len(all_comment_sql) > 0:
+        for e in all_comment_sql:  # 一次性创建注释
+            # table_name = e[0]
+            create_comment_sql = e[0]
+            try:
+                print('正在添加注释:')
+                print(create_comment_sql)
+                # cur_target_constraint.execute(create_comment_sql)
+                mysql_cursor.execute(create_comment_sql)
+                print('comment注释添加完毕\n')
+            except Exception as e:
+                err_count += 1
+                comment_failed_count.append('1')  # comment添加失败就往list对象存1
+                print('\n' + '/* ' + str(e.args) + ' */' + '\n')
+                print('comment添加失败请检查ddl语句!\n')
+                # print(traceback.format_exc())
+                filename = '/tmp/ddl_failed_table.log'
+                f = open(filename, 'a', encoding='utf-8')
+                f.write('\n-- ' + ' CREATE COMMENT ERROR ' + str(err_count) + '\n')
+                f.write(create_comment_sql + ';\n')
+                f.write('\n' + '/* ' + str(e.args) + ' */' + '\n')
+                f.close()
+    else:
+        print('没有注释要创建')
     print(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
     end_time = datetime.datetime.now()
     print('创建comment耗时：' + str((end_time - begin_time).seconds))
@@ -1134,7 +1255,6 @@ def create_meta_table():
     for row in output_table_name:
         table_name = row[0]
         print('#' * 50 + '开始创建表' + table_name + '#' * 50)
-        print(table_name + '\n')
         #  将创建失败的sql记录到log文件
         logging.basicConfig(filename='/tmp/ddl_failed_table.log')
         # 在MySQL创建表前先删除存在的表
@@ -1166,7 +1286,7 @@ def create_meta_table():
         create_table_sql = 'create table {0} ({1})'.format(table_name, ','.join(fieldinfos))  # 生成创建目标表的sql
         # add_pri_key_sql = 'alter table {0} add primary key ({1})'.format(table_name, ','.join(v_pri_key))  #
         # 创建目标表之后增加主键
-        print('\n创建表:' + table_name + '\n')
+        print('创建表:' + table_name + '\n')
         print(create_table_sql)
         try:
             # cur_createtbl.execute(create_table_sql)
@@ -1184,13 +1304,12 @@ def create_meta_table():
             # ddl创建失败的表名记录到文件/tmp/ddl_failed_table.log
             filename = '/tmp/ddl_failed_table.log'
             f = open(filename, 'a', encoding='utf-8')
-            f.write('-' * 50 + 'CREATE TABLE ERROR ' + str(table_index) + '-' * 50 + '\n')
+            f.write('-- ' + 'CREATE TABLE ERROR ' + str(table_index) + '\n')
             f.write('/* ' + table_name + ' */' + '\n')
-            f.write(create_table_sql + '\n\n\n')
+            f.write(create_table_sql + ';\n')
+            f.write('\n' + '/* ' + str(e.args) + ' */' + '\n')
             f.close()
             ddl_failed_table_result.append(table_name)  # 将当前ddl创建失败的表名记录到ddl_failed_table_result的list中
-            ddl_create_error_table = '\n' + '/* ' + str(e.args) + ' */' + '\n'
-            logging.error(ddl_create_error_table)  # ddl创建失败的sql语句输出到文件/tmp/ddl_failed_table.log
             print('表' + table_name + '创建失败请检查ddl语句!\n')
     endtime = datetime.datetime.now()
     print("表创建耗时\n" + "开始时间:" + str(starttime) + '\n' + "结束时间:" + str(endtime) + '\n' + "消耗时间:" + str(
@@ -1200,6 +1319,7 @@ def create_meta_table():
 
 def mig_table_task(list_index):
     err_count = 0
+    err_log = ''
     if args.data_only.upper() == 'TRUE':
         return 1
     list_number = ['0', '1', '2', '3']
@@ -1216,11 +1336,9 @@ def mig_table_task(list_index):
     task_starttime = datetime.datetime.now()
     for v_table_name in new_list[0][int(list_index)]:
         table_name = v_table_name
-        print('\n正在迁移表' + table_name + ' thread ' + str(list_index) + ' ' + str(datetime.datetime.now()))
-        # print('THREAD ' + str(list_index) + ' ' + str(datetime.datetime.now()) + ' \n')
         target_table = source_table = table_name
         try:
-            get_table_count = oracle_cursor.fetch_one("""select count(*) from %s""" % source_table)[0]
+            # get_table_count = oracle_cursor.fetch_one("""select count(*) from %s""" % source_table)[0]
             get_column_length = 'select count(*) from user_tab_columns where table_name= ' + "'" + source_table.upper() + "'"  # 拼接获取源表有多少个列的SQL
             col_len = oracle_cursor.fetch_one(get_column_length)  # 获取源表有多少个列 oracle连接池
             col_len = col_len[0]  # 将游标结果数组的值赋值，该值为表列字段总数
@@ -1242,7 +1360,7 @@ def mig_table_task(list_index):
         for i in range(1, col_len):
             val_str = val_str + '%s' + ','
         val_str = val_str + '%s'  # MySQL批量插入语法是 insert into tb_name values(%s,%s,%s,%s)
-        insert_sql = 'insert into ' + target_table + ' values(' + val_str + ')'  # 拼接insert into 目标表 values  #目标表插入语句
+        insert_sql = 'insert  into ' + target_table + ' values(' + val_str + ')'  # 拼接insert into 目标表 values  #目标表插入语句
         select_sql = 'select * from ' + source_table  # 源查询SQL，如果有where过滤条件，在这里拼接
         try:
             cur_oracle_result.execute(select_sql)  # 执行
@@ -1250,8 +1368,6 @@ def mig_table_task(list_index):
         except Exception:
             print(traceback.format_exc() + '查询Oracle源表数据失败，请检查是否存在该表或者表名小写！\n\n' + table_name)
             continue  # 这里需要显式指定continue，否则某张表不存在就会跳出此函数
-        # print("正在执行插入表:", table_name)
-        # print(datetime.datetime.now())
         source_effectrow = 0
         target_effectrow = 0
         mysql_insert_count = 0
@@ -1272,39 +1388,41 @@ def mig_table_task(list_index):
             # print(cur_oracle_result.description)  # 打印Oracle查询结果集字段列表以及类型
             try:
                 mysql_cursor.executemany(insert_sql, rows)  # 批量插入每次5000行，需要注意的是 rows 必须是 list [] 数据类型
+                # print('aaaa' + str(len(rows)))
                 mysql_insert_count = mysql_insert_count + mysql_cursor.rowcount  # 每次插入的行数
-                # mysql_conn.commit() 如果连接池没有配置自动提交，否则这里需要显式提交
+                mysql_con0.commit()  # 如果连接池没有配置自动提交，否则这里需要显式提交
             except Exception as e:
                 err_count += 1
-                print('\n' + '/* ' + str(e.args) + ' */' + '\n')
+                # print('\n' + '/* ' + str(e.args) + ' */' + '\n')
                 # print(traceback.format_exc())  # 遇到异常记录到log，会继续迁移下张表
                 sql_insert_error = '\n' + '/* ' + str(e.args) + ' */' + '\n'
+                err_log = str(e.args)
                 filename = '/tmp/insert_failed_table.log'
                 f = open(filename, 'a', encoding='utf-8')
-                f.write('-' * 50 + str(err_count) + ' ' + table_name + ' INSERT ERROR' + '-' * 50 + '\n')
+                f.write('\n-- ' + str(err_count) + ' ' + table_name + ' INSERT ERROR' + '\n')
                 f.write(time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()) + '\n\n')
                 f.write(insert_sql + '\n\n\n')
                 f.write(str(rows[0]) + '\n\n')
                 f.write(sql_insert_error + '\n\n')
                 f.close()
-                logging.error(sql_insert_error)  # 插入失败的sql语句输出到文件/tmp/ddl_failed_table.log
-            if get_table_count == 0:
-                print('\n无数据插入')
-                # print('\r', str(mysql_insert_count), '/', str(get_table_count), ' ',str(round((mysql_insert_count /
-                # get_table_count), 2) * 100) + '%', end='',flush=True)  # 实时刷新插入行数
+            # if get_table_count == 0:
+            #     print('\n无数据插入')
+            # print('\r', str(mysql_insert_count), '/', str(get_table_count), ' ',str(round((mysql_insert_count /
+            # get_table_count), 2) * 100) + '%', end='',flush=True)  # 实时刷新插入行数
             if not rows:
                 break  # 当前表游标获取不到数据之后中断循环，返回到mig_database，可以继续下个表
             source_effectrow = cur_oracle_result.rowcount  # 计数源表插入的行数
             target_effectrow = target_effectrow + mysql_cursor.rowcount  # 计数目标表插入的行数
-
         if source_effectrow == target_effectrow:
             is_success = 'Y'
         else:
             is_success = 'N'
         if sql_insert_error:
-            print('\n' + table_name + '插入失败')
+            print(f'[{table_name}] 插入失败  {err_log}\n', end='')
         else:
-            print('\n' + table_name + '插入完成')
+            print(
+                f'[{table_name}] 插入完成 源表行数：{source_effectrow} 目标行数：{target_effectrow}  THREAD {list_index} {str(datetime.datetime.now())}\n',
+                end='')
         try:
             mysql_cursor.execute("""update my_mig_task_info set task_end_time=current_timestamp, 
             source_table_rows=%s,
@@ -1313,10 +1431,9 @@ def mig_table_task(list_index):
                 source_effectrow, target_effectrow, is_success, table_name))  # 占位符需要引号包围
         except Exception:
             print(traceback.format_exc())
-
         # print(datetime.datetime.now())
         #  print('执行时间: ' + str(((insert_end_time - insert_start_time).microseconds/1000)) + ' ms')
-        print('\n\n')
+        # print('\n\n')
     task_endtime = datetime.datetime.now()
     task_exec_time = str((task_endtime - task_starttime).seconds)
     # print("第" + str(list_index) + "部分的表\n" + "开始时间:" + str(task_starttime) + '\n' + "结束时间:" + str(
@@ -1341,7 +1458,7 @@ def async_work():  # 异步不阻塞方式同时插入表
         task_end_time datetime ,thread int,run_time int,source_table_rows int,target_table_rows int,
         is_success varchar(100))""")
     # 生成异步任务并开启
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix='aa') as executor:
         task = {executor.submit(mig_table_task, v_index): v_index for v_index in index}
         for future in concurrent.futures.as_completed(task):
             task_name = task[future]
@@ -1350,9 +1467,8 @@ def async_work():  # 异步不阻塞方式同时插入表
             except Exception as exc:
                 print('%r generated an exception: %s' % (task_name, exc))
             else:
-                print(str(task_name))
-                # print('Thread Job ' + str(task_name) + ' Is Done:' + str(data))
-                # print('-' * 50 + '\n')
+                # print(str(task_name))
+                print(str(datetime.datetime.now()) + ' TASK JOB ' + str(task_name) + ' Is Done:' + str(data))
     end_time = datetime.datetime.now()
     print('表数据迁移耗时：' + str((end_time - begin_time).seconds) + '\n')
     print('#' * 50 + '表数据插入完成' + '#' * 50 + '\n')
@@ -1401,7 +1517,7 @@ def mig_summary():
     # oracle_schema = oracle_cursor.fetch_one("""select user from dual""")[0]
     oracle_tab_count = all_table_count  # oracle要迁移的表总数
     oracle_view_count = all_view_count  # oracle要创建的视图总数
-    oracle_constraint_count = all_constraints_count  # oracle的约束以及索引总数
+    oracle_constraint_count = all_constraints_count + function_based_index_count  # oracle的约束以及索引总数
     oracle_fk_count = all_fk_count  # oracle外键总数
     if oracle_autocol_total:
         oracle_autocol_count = oracle_autocol_total[0]  # oracle自增列总数
@@ -1440,10 +1556,13 @@ def mig_summary():
     print('3、自增列数量总计: ' + str(
         oracle_autocol_count) + ' 目标自增列创建成功计数: ' + mysql_success_incol_count + ' 目标自增列修改失败计数: ' + str(
         autocol_error_count))
-    print('4、索引以及约束总计: ' + str(
+    print('4、触发器数量总计: ' + str(
+        normal_trigger_count) + ' 触发器创建成功计数: ' + str(trigger_success_count) + ' 触发器创建失败计数: ' + str(
+        trigger_failed_count))
+    print('5、索引以及约束总计: ' + str(
         oracle_constraint_count) + ' 目标索引以及约束创建成功计数: ' + mysql_success_constraint + ' 目标索引以及约束创建失败计数: ' + str(
         index_failed_count))
-    print('5、外键总计: ' + str(oracle_fk_count) + ' 目标外键创建成功计数: ' + mysql_success_fk + ' 目标外键创建失败计数: ' +
+    print('6、外键总计: ' + str(oracle_fk_count) + ' 目标外键创建成功计数: ' + mysql_success_fk + ' 目标外键创建失败计数: ' +
           str(fk_failed_count))
     csv_file = open("/tmp/insert_table.csv", 'a', newline='')
     # 将MySQL创建成功的表总数记录保存到csv文件
@@ -1497,7 +1616,7 @@ if __name__ == '__main__':
     mig_table()
     create_meta_constraint()  # 创建主键约束以及索引
     create_meta_foreignkey()  # 创建外键约束
-    auto_increament_col()  # 增加自增列
+    create_trigger_col()  # 增加自增列以及创建触发器
     create_view()  # 创建视图
     create_comment()  # 添加注释
     mig_end_time = datetime.datetime.now()
