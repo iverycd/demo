@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 # oracle_mig_mysql.py
 # Oracle database migration to MySQL
-# CURRENT VERSION
-# V1.5.8
+# V1.6.0 2021-03-31
 import argparse
 import textwrap
 import cx_Oracle
@@ -45,7 +44,7 @@ parser = argparse.ArgumentParser(prog='oracle_mig_mysql',
                                  formatter_class=argparse.RawDescriptionHelpFormatter,
                                  description=textwrap.dedent('''\
 VERSION:
-V1.5.8
+V1.6.0
 
 EXAMPLE:
     EG(1):RUN MIGRATION FETCH AND INSERT 10000 ROWS DATA INTO TABLE:\n ./oracle_to_mysql -b 10000\n
@@ -58,7 +57,13 @@ parser.add_argument('--custom_table', '-c', help='MIG CUSTOM TABLES INTO MySQL,D
                     choices=['true', 'false'], default='false')  # 默认是全表迁移
 parser.add_argument('--data_only', '-d', help='MIG ONLY DATA ROW DO NOT CREATE TABLE', choices=['true', 'false'],
                     default='false')
+parser.add_argument('--parallel_degree', '-p', help='parallel degree default 16', type=int)
 args = parser.parse_args()
+
+# -c命令与-d命令不能同时使用的判断
+if args.custom_table.upper() == 'TRUE' and args.data_only.upper() == 'TRUE':
+    print('ERROR: -c AND -d OPTION CAN NOT BE USED TOGETHER!\nEXIT')
+    sys.exit(0)
 
 # 判断命令行参数-b是否指定
 if args.batch_size:
@@ -81,6 +86,16 @@ if args.custom_table.upper() == 'TRUE':
                 fd.write(text)
 else:
     custom_table = 'false'
+
+# 并行度,可指定并行度，默认为16
+list_parallel = []
+if args.parallel_degree:
+    degree = args.parallel_degree
+else:
+    degree = 16
+for i in range(degree):
+    list_parallel.append(i)
+v_max_workers = len(list_parallel)
 
 # oracle、mysql连接池以及游标对象
 oracle_cursor = configDB.OraclePool()  # Oracle连接池
@@ -124,9 +139,6 @@ comment_failed_count = []  # 用于统计注释添加失败的总数
 # 环境有关变量
 sys.stdout = Logger(stream=sys.stdout)
 os.environ['NLS_LANG'] = 'SIMPLIFIED CHINESE_CHINA.UTF8'  # 设置字符集为UTF8，防止中文乱码
-
-source_db_type = 'Oracle'  # 大小写无关，后面会被转为大写
-target_db_type = 'MySQL'  # 大小写无关，后面会被转为大写
 
 
 # clob、blob、nclob要在读取源表前加载outputtypehandler属性,即将Oracle大字段转为string类型
@@ -197,7 +209,7 @@ def bisector_list(tabulation: list, num: int):
 
 def split_success_list():  # 将创建表成功的list结果分为2个小list,平均分
     # n = round(len(list_success_table) / 2)
-    n = 4  # 平均分成2份list
+    n = v_max_workers  # 将所有数据表平均分成n份list
     # print('切片的大小:', n)
     # print('原始list：', list_success_table, '\n')
     new_list.append(bisector_list(list_success_table, n))
@@ -213,7 +225,7 @@ def print_source_info():
     print(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(time.time())))
     print('源数据库连接信息: ' + '模式名: ' + str(oracle_info['user']) + ' 连接字符串: ' + str(oracle_info['dsn']))
     print('\n要迁移的表如下:')
-    if custom_table.upper() == 'TRUE':
+    if custom_table.upper() == 'TRUE' or args.data_only.upper() == 'TRUE':
         with open("/tmp/table.txt", "r") as f:  # 打开文件
             for line in f:
                 print(line.upper())
@@ -624,6 +636,8 @@ def tbl_columns(table_name):
 
 # 批量创建外键
 def create_meta_foreignkey():
+    if args.data_only.upper() == 'TRUE':  # 如果指定-d选项不创建外键
+        return 1
     global all_fk_count
     global all_fk_success_count
     fk_err_count = 0
@@ -684,6 +698,8 @@ def create_meta_foreignkey():
 
 # 批量创建主键以及索引
 def create_meta_constraint():
+    if args.data_only.upper() == 'TRUE':  # -d选项不创建约束
+        return 1
     global all_constraints_count  # 约束以及索引总数
     global all_constraints_success_count  # mysql中约束以及索引创建成功的计数
     global function_based_index_count  # function_based_index总数
@@ -790,8 +806,8 @@ def create_meta_constraint():
                 print('约束或者索引创建失败请检查ddl语句!\n')
                 filename = '/tmp/ddl_failed_table.log'
                 f = open(filename, 'a', encoding='utf-8')
-                f.write('\n-- ' + str(err_count) + ' CONSTRAINTS CREATE ERROR' + '\n')
-                f.write(create_index_sql + ';\n\n\n')
+                f.write('\n-- ' + ' CONSTRAINTS CREATE ERROR' + str(err_count) + ' -- \n')
+                f.write(create_index_sql + '\n\n\n')
                 f.write('\n' + '/* ' + str(e.args) + ' */' + '\n')
                 f.close()
     else:
@@ -840,6 +856,8 @@ def create_meta_constraint():
 
 # 查找具有自增特性的表以及字段名称
 def create_trigger_col():
+    if args.data_only.upper() == 'TRUE':  # -d选项不会创建自增列
+        return 1
     global all_inc_col_success_count
     global all_inc_col_failed_count
     global normal_trigger_count  # 用于统计oracle触发器（排除掉序列相关触发器）的总数
@@ -905,7 +923,7 @@ def create_trigger_col():
                 # print(traceback.format_exc())
                 filename = '/tmp/ddl_failed_table.log'
                 f = open(filename, 'a', encoding='utf-8')
-                f.write('-' * 50 + str(count_1) + ' AUTO_COL INDEX CREATE ERROR' + '-' * 50 + '\n')
+                f.write('-- ' + str(count_1) + ' AUTO_INCREAMENT COL INDEX CREATE ERROR' + ' -- ' + '\n')
                 f.write(create_autoincrea_index + '\n\n\n')
                 f.close()
                 ddl_incindex_error = '\n' + '/* ' + str(e.args) + ' */' + '\n'
@@ -931,7 +949,7 @@ def create_trigger_col():
                 # print(traceback.format_exc())
                 filename = '/tmp/ddl_failed_table.log'
                 f = open(filename, 'a', encoding='utf-8')
-                f.write('\n-- ' + ' MODIFY AUTO_COL ERROR ' + str(all_inc_col_failed_count) + '\n')
+                f.write('\n-- ' + ' MODIFY AUTO_COL ERROR ' + str(all_inc_col_failed_count) + ' -- \n')
                 f.write(alter_increa_col + ';\n')
                 f.write('\n' + '/* ' + str(e.args) + ' */' + '\n')
                 f.close()
@@ -985,7 +1003,7 @@ def create_trigger_col():
                 print('常规触发器创建失败请检查ddl语句!\n')
                 filename = '/tmp/ddl_failed_table.log'
                 f = open(filename, 'a', encoding='utf-8')
-                f.write('\n-- ' + ' NORMAL TRIGGER CREATE ERROR' + str(trigger_failed_count) + '\n')
+                f.write('\n-- ' + ' NORMAL TRIGGER CREATE ERROR' + str(trigger_failed_count) + ' -- \n')
                 f.write(create_trigger + ';\n')
                 f.write('\n' + '/* ' + str(e.args) + ' */' + '\n')
                 f.close()
@@ -995,6 +1013,8 @@ def create_trigger_col():
 
 # 获取视图定义以及创建
 def create_view():
+    if args.data_only.upper() == 'TRUE' or args.custom_table.upper() == 'TRUE':  # 如果指定-d或者-c选项不创建视图
+        return 1
     global all_view_count
     global all_view_success_count
     global all_view_failed_count
@@ -1040,7 +1060,7 @@ def create_view():
                     # print(traceback.format_exc())
                     filename = '/tmp/ddl_failed_table.log'
                     f = open(filename, 'a', encoding='utf-8')
-                    f.write('\n-- ' + ' CREATE VIEW ERROR ' + str(all_view_failed_count) + '\n')
+                    f.write('\n-- ' + ' CREATE VIEW ' + view_name + ' ERROR ' + str(all_view_failed_count) + ' -- \n')
                     f.write(create_view_sql + ';\n')
                     f.write('\n' + '/* ' + str(e.args) + ' */' + '\n')
                     f.close()
@@ -1055,6 +1075,8 @@ def create_view():
 
 # 数据库对象的comment注释,这里仅包含表的注释，列的注释在上面创建表结构的时候已经包括
 def create_comment():
+    if args.data_only.upper() == 'TRUE':  # 如果指定-d选项，不创建注释
+        return 1
     err_count = 0
     all_comment_sql = []
     output_table_name = []
@@ -1133,8 +1155,12 @@ def print_insert_failed_table(table_name):
 
 # 批量将Oracle数据插入到MySQL的方法,之前是调用该函数串行迁移表，现在是异步，async_work来去取代
 def mig_table():
+    mysql_con = configDB.MySQLPOOL.connection()
+    mysql_cur = mysql_con.cursor()  # MySQL连接池
+    mysql_cur.arraysize = row_batch_size
     err_count = 0
-    if args.data_only.upper() == 'FALSE':
+    col_len = 0
+    if args.data_only.upper() == 'FALSE':  # 只有指定了-d选项才会执行此单步迁移
         return 1
     with open("/tmp/table.txt", "r") as f:  # 读取自定义表
         for table_name in f.readlines():  # 按顺序读取每一个表
@@ -1146,7 +1172,7 @@ def mig_table():
                 col_len = oracle_cursor.fetch_one(get_column_length)  # 获取源表有多少个列 oracle连接池
                 col_len = col_len[0]  # 将游标结果数组的值赋值，该值为表列字段总数
             except Exception as e:
-                print(traceback.format_exc() + '获取源表总数以及列总数失败，请检查是否存在该表或者表名小写！' + table_name)
+                print('获取源表总数以及列总数失败，请检查是否存在该表或者表名小写！' + table_name)
                 err_count += 1
                 sql_insert_error = traceback.format_exc()
                 filename = '/tmp/insert_failed_table.log'
@@ -1156,8 +1182,8 @@ def mig_table():
                 f.write(sql_insert_error + '\n\n')
                 f.close()
                 logging.error(sql_insert_error)  # 插入失败的sql语句输出到文件/tmp/ddl_failed_table.log
-                mysql_cursor.execute("""insert into my_mig_task_info(table_name, task_start_time,thread,is_success) values ('%s',
-                                    current_timestamp,%s,'CHECK TABLE')""" % (table_name, 100))  # %s占位符的值需要引号包围
+                # mysql_cur.execute("""insert into my_mig_task_info(table_name, task_start_time,thread,is_success) values ('%s',
+                #                     current_timestamp,%s,'CHECK TABLE')""" % (table_name, 100))  # %s占位符的值需要引号包围
             val_str = ''  # 用于生成批量插入的列字段变量
             for i in range(1, col_len):
                 val_str = val_str + '%s' + ','
@@ -1168,7 +1194,7 @@ def mig_table():
                 cur_oracle_result.execute(select_sql)  # 执行
                 # temp_cur = oracle_cursor.execute_sql(select_sql, 1000)
             except Exception:
-                print(traceback.format_exc() + '查询Oracle源表数据失败，请检查是否存在该表或者表名小写！\n\n' + table_name)
+                print('查询Oracle源表数据失败，请检查是否存在该表或者表名小写！\n\n' + table_name)
             print("正在执行插入表:", table_name)
             print(datetime.datetime.now())
             source_effectrow = 0
@@ -1178,8 +1204,9 @@ def mig_table():
             # mig_table = "'" + table_name + "'"
             # 往MySQL表my_mig_task_info记录开始插入的时间
             try:
-                mysql_cursor.execute("""insert into my_mig_task_info(table_name, task_start_time,thread) values ('%s',
+                mysql_cur.execute("""insert into my_mig_task_info(table_name, task_start_time,thread) values ('%s',
                         current_timestamp,%s)""" % (table_name, 100))  # %s占位符的值需要引号包围
+                mysql_con.commit()
             except Exception:
                 print(traceback.format_exc())
             while True:
@@ -1190,9 +1217,9 @@ def mig_table():
                 # MySQL fetchmany 返回的是 tuple 数据类型 所以用list做类型转换
                 # print(cur_oracle_result.description)  # 打印Oracle查询结果集字段列表以及类型
                 try:
-                    mysql_cursor.executemany(insert_sql, rows)  # 批量插入每次5000行，需要注意的是 rows 必须是 list [] 数据类型
-                    mysql_insert_count = mysql_insert_count + mysql_cursor.rowcount  # 每次插入的行数
-                    # mysql_conn.commit() 如果连接池没有配置自动提交，否则这里需要显式提交
+                    mysql_cur.executemany(insert_sql, rows)  # 批量插入每次5000行，需要注意的是 rows 必须是 list [] 数据类型
+                    mysql_insert_count = mysql_insert_count + mysql_cur.rowcount  # 每次插入的行数
+                    mysql_con.commit()  # 如果连接池没有配置自动提交，否则这里需要显式提交
                 except Exception as e:
                     err_count += 1
                     print('\n' + '/* ' + str(e.args) + ' */' + '\n')
@@ -1214,7 +1241,7 @@ def mig_table():
                 if not rows:
                     break  # 当前表游标获取不到数据之后中断循环，返回到mig_database，可以继续下个表
                 source_effectrow = cur_oracle_result.rowcount  # 计数源表插入的行数
-                target_effectrow = target_effectrow + mysql_cursor.rowcount  # 计数目标表插入的行数
+                target_effectrow = target_effectrow + mysql_cur.rowcount  # 计数目标表插入的行数
             print('source_effectrow:' + str(source_effectrow))
             print('target_effectrow:' + str(target_effectrow))
             if source_effectrow == target_effectrow:
@@ -1226,11 +1253,12 @@ def mig_table():
             else:
                 print('\n' + table_name + '插入完成')
             try:
-                mysql_cursor.execute("""update my_mig_task_info set task_end_time=current_timestamp, 
+                mysql_cur.execute("""update my_mig_task_info set task_end_time=current_timestamp, 
                             source_table_rows=%s,
                             target_table_rows=%s,
                             is_success='%s' where table_name='%s'""" % (
                     source_effectrow, target_effectrow, is_success, table_name))  # 占位符需要引号包围
+                mysql_con.commit()
             except Exception:
                 print(traceback.format_exc())
             print('\n\n')
@@ -1304,7 +1332,7 @@ def create_meta_table():
             # ddl创建失败的表名记录到文件/tmp/ddl_failed_table.log
             filename = '/tmp/ddl_failed_table.log'
             f = open(filename, 'a', encoding='utf-8')
-            f.write('-- ' + 'CREATE TABLE ERROR ' + str(table_index) + '\n')
+            f.write('-- ' + 'CREATE TABLE ' + table_name + ' ERROR ' + str(table_index) + ' -- \n')
             f.write('/* ' + table_name + ' */' + '\n')
             f.write(create_table_sql + ';\n')
             f.write('\n' + '/* ' + str(e.args) + ' */' + '\n')
@@ -1322,7 +1350,7 @@ def mig_table_task(list_index):
     err_log = ''
     if args.data_only.upper() == 'TRUE':
         return 1
-    list_number = ['0', '1', '2', '3']
+    list_number = list_parallel  # 并行度
     if list_index in list_number:
         source_db0 = cx_Oracle.connect(ora_conn)
         cur_oracle_result = source_db0.cursor()  # 查询Oracle源表的游标结果集
@@ -1388,7 +1416,6 @@ def mig_table_task(list_index):
             # print(cur_oracle_result.description)  # 打印Oracle查询结果集字段列表以及类型
             try:
                 mysql_cursor.executemany(insert_sql, rows)  # 批量插入每次5000行，需要注意的是 rows 必须是 list [] 数据类型
-                # print('aaaa' + str(len(rows)))
                 mysql_insert_count = mysql_insert_count + mysql_cursor.rowcount  # 每次插入的行数
                 mysql_con0.commit()  # 如果连接池没有配置自动提交，否则这里需要显式提交
             except Exception as e:
@@ -1431,14 +1458,6 @@ def mig_table_task(list_index):
                 source_effectrow, target_effectrow, is_success, table_name))  # 占位符需要引号包围
         except Exception:
             print(traceback.format_exc())
-        # print(datetime.datetime.now())
-        #  print('执行时间: ' + str(((insert_end_time - insert_start_time).microseconds/1000)) + ' ms')
-        # print('\n\n')
-    task_endtime = datetime.datetime.now()
-    task_exec_time = str((task_endtime - task_starttime).seconds)
-    # print("第" + str(list_index) + "部分的表\n" + "开始时间:" + str(task_starttime) + '\n' + "结束时间:" + str(
-    #     task_endtime) + '\n' + "消耗时间:" + task_exec_time + "秒\n")
-    # print('第' + str(list_index) + '部分表迁移完成\n\n\n')
 
 
 def async_work():  # 异步不阻塞方式同时插入表
@@ -1446,7 +1465,7 @@ def async_work():  # 异步不阻塞方式同时插入表
         return 1
     print('#' * 50 + '开始数据迁移' + '#' * 50 + '\n')
     begin_time = datetime.datetime.now()
-    index = ['0', '1', '2', '3']  # 任务序列
+    index = list_parallel  # 任务序列
     csv_file = open("/tmp/insert_table.csv", 'w', newline='')
     writer = csv.writer(csv_file)
     writer.writerow(('TABLE_NAME', 'TASK_START_TIME', 'TASK_END_TIME', 'THREAD', 'RUN_TIME', 'TOTAL_ROWS', 'INSERT_ROWS'
@@ -1492,7 +1511,7 @@ def async_work():  # 异步不阻塞方式同时插入表
     csv_file.close()
 
 
-def mig_table_main_process():
+def mig_table_main_process():  # long long ago used just for test
     p_starttime = datetime.datetime.now()
     p_pro = []
     # 批量调
@@ -1509,6 +1528,37 @@ def mig_table_main_process():
     p_endtime = datetime.datetime.now()
     print('多进程开始时间：', p_starttime, '多进程结束时间：', p_endtime, '执行时间：', str((p_endtime - p_starttime).seconds), 'seconds')
     time.sleep(0.1)
+
+
+# 输出函数以及存储过程定义
+def ddl_function_procedure():
+    sql_path = '/tmp/ddl_function_procedure.sql'  # 用来记录表迁移记录
+    if os.path.exists(sql_path):
+        os.remove(sql_path)
+    index = 0
+    filename = '/tmp/ddl_function_procedure.sql'
+    f = open(filename, 'a', encoding='utf-8')
+    f.write('/*EXPORT FROM ORACLE DATABASE FUNCTION AND PROCEDURE ' + '*/\n')
+    f.close()
+    try:
+        ddl_out = oracle_cursor.fetch_all(
+            """SELECT DBMS_METADATA.GET_DDL(U.OBJECT_TYPE, u.object_name) ddl_sql,u.object_name,u.object_type,u.status,(select user from dual) FROM USER_OBJECTS u where U.OBJECT_TYPE IN ('FUNCTION','PROCEDURE','PACKAGE') order by OBJECT_TYPE""")
+        for v_out_ddl in ddl_out:
+            index += 1
+            ddl_sql = str(v_out_ddl[0])
+            object_name = v_out_ddl[1]
+            object_type = v_out_ddl[2]
+            status = v_out_ddl[3]
+            current_user = v_out_ddl[4]
+            # print("""/* """, '[' + str(index) + ']', object_type, object_name.upper(), '[' + status + ']', """*/""")
+            # print((ddl_sql.replace('"' + current_user + '".', '')).replace('"', ''))  # 去掉模式名以及双引号包围
+            f = open(filename, 'a', encoding='utf-8')
+            f.write('\n/*' + '[' + str(
+                index) + '] ' + object_type + ' ' + object_name.upper() + ' [' + status + ']' + '*/\n')
+            f.write((ddl_sql.replace('"' + current_user + '".', '')).replace('"', ''))   # 去掉模式名以及双引号包围
+            f.close()
+    except Exception as e:
+        print('查询存储过程以及函数失败！' + str(e))
 
 
 # 迁移摘要
@@ -1587,6 +1637,7 @@ def mig_summary():
     print(
         '迁移日志已保存到/tmp/mig.log\n表迁移记录请查看/tmp/insert_table.csv或者查询表my_mig_task_info\n有关迁移错误请查看/tmp/ddl_failed_table.log以及/tmp'
         '/insert_failed_table.log')
+    print('源数据库存储过程以及函数ddl定义已保存至/tmp/ddl_function_procedure.sql')
 
 
 # 清理日志
@@ -1606,19 +1657,18 @@ def clean_log():
 
 if __name__ == '__main__':
     mig_start_time = datetime.datetime.now()
-    print_source_info()  # 打印连接信息
-    clean_log()  # 清理上次迁移的log
-    create_meta_table()  # 创建表结构单线程
-    split_success_list()  # 把创建成功的表分成2个list
-    # create_table_main_process()  # 并行创建表,nouse
-    # mig_table_task(0)
-    async_work()  # 异步2个线程迁移数据
-    mig_table()
-    create_meta_constraint()  # 创建主键约束以及索引
-    create_meta_foreignkey()  # 创建外键约束
-    create_trigger_col()  # 增加自增列以及创建触发器
-    create_view()  # 创建视图
-    create_comment()  # 添加注释
+    print_source_info()
+    clean_log()
+    create_meta_table()
+    split_success_list()
+    async_work()
+    mig_table()  # -d option single to mig
+    create_meta_constraint()
+    create_meta_foreignkey()
+    create_trigger_col()
+    create_view()
+    create_comment()
+    ddl_function_procedure()
     mig_end_time = datetime.datetime.now()
     mig_summary()
 source_db.close()
